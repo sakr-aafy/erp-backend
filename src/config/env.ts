@@ -47,7 +47,11 @@ const schema = z.object({
 });
 
 // En test, des secrets fixes sont fournis si absents.
-const raw = { ...process.env };
+const raw: Record<string, string | undefined> = { ...process.env };
+// Valeurs collées dans un tableau de bord (Vercel…) : retire espaces et guillemets englobants (ex. "true" ou ' https://… ').
+for (const [k, val] of Object.entries(raw)) if (typeof val === 'string') raw[k] = val.trim().replace(/^(["'])(.*)\1$/, '$2').trim();
+// Vercel sert toujours en HTTPS : le cookie de session est Secure par défaut (surchargeable explicitement).
+if (raw.VERCEL) raw.COOKIE_SECURE ??= 'true';
 if (raw.NODE_ENV === 'test') {
   raw.JWT_ACCESS_SECRET ??= 'test-access-secret-0123456789-0123456789';
   raw.JWT_REFRESH_SECRET ??= 'test-refresh-secret-0123456789-012345678';
