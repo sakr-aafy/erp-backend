@@ -87,7 +87,7 @@ describe('SMTP et réinitialisation par e-mail', () => {
 
 describe('configuration de production', () => {
   const run = (env: Record<string, string>) => spawnSync(process.execPath, ['--import', 'tsx', '-e', "import('./src/config/env.ts').then(m=>console.log('RESET='+m.passwordResetEnabled))"], {
-    env: { PATH: process.env.PATH!, ...env }, encoding: 'utf8', cwd: process.cwd(),
+    env: { PATH: process.env.PATH!, SMTP_HOST: '', SMTP_FROM: '', ...env }, encoding: 'utf8', cwd: process.cwd(),
   });
   const base = { NODE_ENV: 'production', MONGO_URI: 'mongodb://x', JWT_ACCESS_SECRET: 'a1b2c3d4e5f60718293a4b5c6d7e8f90aabbccdd', JWT_REFRESH_SECRET: '0f9e8d7c6b5a49382716f5e4d3c2b1a0ffeeddcc',
     COOKIE_SECURE: 'true', CORS_ORIGIN: 'https://erp.exemple.tn', APP_URL: 'https://erp.exemple.tn' };
