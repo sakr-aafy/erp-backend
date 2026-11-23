@@ -1,0 +1,20 @@
+import { Router } from 'express';
+import { asyncHandler as h } from '../../utils/async-handler.js';
+import { validate } from '../../middlewares/validate.js';
+import { authenticate, requirePermission as can } from '../../middlewares/auth.js';
+import * as c from './customer.controller.js';
+import { customerBalanceCheck } from '../invoices/invoice.service.js';
+import * as v from './customer.validator.js';
+
+export const customerRoutes = Router();
+customerRoutes.use(authenticate);
+customerRoutes.get('/', can('customers:view'), validate({ query: v.listQuery }), h(c.list));
+customerRoutes.get('/export', can('customers:view'), validate({ query: v.exportQuery }), h(c.exportList));
+customerRoutes.post('/', can('customers:create'), validate({ body: v.createCustomerBody }), h(c.create));
+customerRoutes.get('/:id', can('customers:view'), validate({ params: v.idParam }), h(c.get));
+customerRoutes.get('/:id/pdf', can('customers:view'), validate({ params: v.idParam }), h(c.fichePdf));
+customerRoutes.get('/:id/balance-check', can('customers:view'), validate({ params: v.idParam }), h(async (req, res) => res.json(await customerBalanceCheck(req.auth!.companyId, req.params.id as string))));
+customerRoutes.put('/:id', can('customers:update'), validate({ params: v.idParam, body: v.updateCustomerBody }), h(c.update));
+customerRoutes.post('/:id/archive', can('customers:update'), validate({ params: v.idParam }), h(c.archive));
+customerRoutes.post('/:id/reactivate', can('customers:update'), validate({ params: v.idParam }), h(c.reactivate));
+customerRoutes.delete('/:id', can('customers:delete'), validate({ params: v.idParam }), h(c.remove));
