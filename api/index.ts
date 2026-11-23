@@ -29,6 +29,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     app = undefined; ready = undefined;
     return fail(res, 'STARTUP_FAILED', e instanceof Error ? `${e.name}: ${e.message}`.slice(0, 600) : 'erreur de démarrage');
   }
+  if (!app) return fail(res, 'STARTUP_FAILED', 'application non initialisée');
   app(req, res);
 }
 
