@@ -8,5 +8,5 @@ export const logger = pino({
       '*.currentPassword', '*.passwordHash', '*.token', '*.resetToken', '*.refreshToken', '*.accessToken', 'SEED_ADMIN_PASSWORD', 'SMTP_PASS'],
     censor: '[REDACTED]',
   },
-  ...(env.NODE_ENV === 'development' ? { transport: { target: 'pino-pretty' } } : {}),
+  ...(env.NODE_ENV === 'development' && !process.env.VERCEL ? { transport: { target: 'pino-pretty' } } : {}),
 });
