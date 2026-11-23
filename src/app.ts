@@ -1,9 +1,9 @@
 import mongoose from 'mongoose';
 import express from 'express';
-import helmet from 'helmet';
+import helmetModule from 'helmet';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
-import rateLimit from 'express-rate-limit';
+import { rateLimit } from 'express-rate-limit';
 import { pinoHttp } from 'pino-http';
 import swaggerUi from 'swagger-ui-express';
 import { env, swaggerEnabled } from './config/env.js';
@@ -38,6 +38,9 @@ import { expenseRoutes, expenseCategoryRoutes } from './modules/expenses/expense
 import { reportRoutes } from './modules/reports/reports.routes.js';
 import { accountingRoutes } from './modules/accounting/accounting.routes.js';
 import { auditRoutes } from './modules/audit/audit.routes.js';
+
+// Interop ESM/CJS : selon la résolution TypeScript (Vercel compile en CJS), le défaut de helmet est la fonction ou { default }.
+const helmet = ((helmetModule as unknown as { default?: typeof helmetModule }).default ?? helmetModule) as typeof helmetModule;
 
 let referencesRegistered = false;
 export function createApp() {
