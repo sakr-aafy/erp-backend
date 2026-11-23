@@ -40,7 +40,7 @@ import { accountingRoutes } from './modules/accounting/accounting.routes.js';
 import { auditRoutes } from './modules/audit/audit.routes.js';
 
 // Interop ESM/CJS : selon la résolution TypeScript (Vercel compile en CJS), le défaut de helmet est la fonction ou { default }.
-const helmet = ((helmetModule as unknown as { default?: typeof helmetModule }).default ?? helmetModule) as typeof helmetModule;
+const helmet = ((helmetModule as unknown as { default?: unknown }).default ?? helmetModule) as unknown as () => express.RequestHandler;
 
 let referencesRegistered = false;
 export function createApp() {
