@@ -40,7 +40,7 @@ const schema = z.object({
   if (!v.COOKIE_SECURE) bad('COOKIE_SECURE', 'doit être true en production (cookie Secure, HTTPS obligatoire)');
   if (/change-?me|example|secret|password/i.test(v.JWT_ACCESS_SECRET + v.JWT_REFRESH_SECRET)) bad('JWT_ACCESS_SECRET', 'secrets JWT par défaut interdits en production');
   if (v.JWT_ACCESS_SECRET === v.JWT_REFRESH_SECRET) bad('JWT_REFRESH_SECRET', 'doit différer de JWT_ACCESS_SECRET');
-  if (v.CORS_ORIGIN.includes('*') || !/^https:\/\//.test(v.CORS_ORIGIN.split(',')[0]!)) bad('CORS_ORIGIN', 'origines HTTPS explicites requises (pas de *)');
+  if (v.CORS_ORIGIN.includes('*') || !/^https:\/\//.test(v.CORS_ORIGIN.split(',')[0]!.trim())) bad('CORS_ORIGIN', 'origines HTTPS explicites requises (pas de *)');
   if (v.BCRYPT_ROUNDS < 10) bad('BCRYPT_ROUNDS', 'minimum 10 en production');
   if (v.DEV_LOG_RESET_TOKEN) bad('DEV_LOG_RESET_TOKEN', 'interdit en production');
   if (!/^https:\/\//.test(v.APP_URL)) bad('APP_URL', 'doit être en HTTPS en production');

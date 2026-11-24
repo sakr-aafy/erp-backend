@@ -31,7 +31,7 @@ export const totalsSchema = new Schema(
   },
   { _id: false },
 );
-const customerSnapshot = new Schema({ name: String, taxId: String, address: addressSchema }, { _id: false });
+const customerSnapshot = new Schema({ name: String, code: String, taxId: String, address: addressSchema, shippingAddress: addressSchema }, { _id: false });
 const withholdingSchema = new Schema({ ruleId: oid('FiscalRule'), code: String, ratePct: Number, base: String, amountMinor: Number }, { _id: false });
 const stampSchema = new Schema({ ruleId: oid('FiscalRule'), code: String, amountMinor: Number }, { _id: false });
 
@@ -86,6 +86,7 @@ const invoiceSchema = new Schema({
 invoiceSchema.index({ companyId: 1, type: 1, number: 1 }, { unique: true, partialFilterExpression: { number: { $type: 'string' } } });
 invoiceSchema.index({ companyId: 1, status: 1, issueDate: -1 });
 invoiceSchema.index({ companyId: 1, customerId: 1, status: 1 });
+invoiceSchema.index({ companyId: 1, customerId: 1, issueDate: -1 }); // fiche client : historique par date
 invoiceSchema.index({ companyId: 1, paymentStatus: 1, 'schedule.dueDate': 1 });
 invoiceSchema.index({ companyId: 1, creditedInvoiceId: 1 });
 export type InvoiceDoc = InferSchemaType<typeof invoiceSchema>;
@@ -121,6 +122,7 @@ const deliveryNoteSchema = new Schema({
 deliveryNoteSchema.index({ companyId: 1, number: 1 }, { unique: true });
 deliveryNoteSchema.index({ companyId: 1, status: 1, deliveryDate: -1 });
 deliveryNoteSchema.index({ companyId: 1, customerId: 1, status: 1 });
+deliveryNoteSchema.index({ companyId: 1, customerId: 1, deliveryDate: -1 }); // fiche client : historique par date
 deliveryNoteSchema.index({ companyId: 1, 'source.id': 1 });
 export type DeliveryNoteDoc = InferSchemaType<typeof deliveryNoteSchema>;
 export const DeliveryNote = model('DeliveryNote', deliveryNoteSchema);

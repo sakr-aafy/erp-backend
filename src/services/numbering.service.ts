@@ -20,6 +20,8 @@ export const DEFAULT_SERIES: Record<string, { prefix: string; padding: number; i
   expense: { prefix: 'DEP-', padding: 6, includeYear: true, resetYearly: true },
   treasuryTransfer: { prefix: 'VIR-', padding: 6, includeYear: true, resetYearly: true },
   reconciliation: { prefix: 'RAP-', padding: 6, includeYear: true, resetYearly: true },
+  // Code client : continu, sans année (CL-00001)
+  customer: { prefix: 'CL-', padding: 5, includeYear: false, resetYearly: false },
   // Journaux comptables : numérotation continue par journal (sans remise à zéro)
   journal_sales: { prefix: 'VTE-', padding: 6, includeYear: false, resetYearly: false },
   journal_purchases: { prefix: 'ACH-', padding: 6, includeYear: false, resetYearly: false },

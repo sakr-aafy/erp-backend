@@ -54,7 +54,7 @@ describe('clients : archivage, suppression et règles métier', () => {
     const c = (await mk(A.token, { name: 'Archivable' })).body;
     expect((await api().post(`/api/v1/customers/${c.id}/archive`).set(authed(A.token))).body.isArchived).toBe(true);
     expect((await api().post(`/api/v1/customers/${c.id}/archive`).set(authed(A.token))).status).toBe(409);
-    expect((await api().put(`/api/v1/customers/${c.id}`).set(authed(A.token)).send({ phone: '1' })).status).toBe(409);
+    expect((await api().put(`/api/v1/customers/${c.id}`).set(authed(A.token)).send({ phone: '+21671000001' })).status).toBe(409);
     const def = await api().get('/api/v1/customers?q=Archivable').set(authed(A.token));
     expect(def.body.total).toBe(0);
     expect((await api().get('/api/v1/customers?q=Archivable&status=archived').set(authed(A.token))).body.total).toBe(1);
@@ -91,7 +91,7 @@ describe('clients : isolation et permissions', () => {
   it('isolation stricte par société', async () => {
     const c = (await mk(A.token, { name: 'Privé Alpha' })).body;
     expect((await api().get(`/api/v1/customers/${c.id}`).set(authed(B.token))).status).toBe(404);
-    expect((await api().put(`/api/v1/customers/${c.id}`).set(authed(B.token)).send({ phone: '9' })).status).toBe(404);
+    expect((await api().put(`/api/v1/customers/${c.id}`).set(authed(B.token)).send({ phone: '+21671000009' })).status).toBe(404);
     expect((await api().delete(`/api/v1/customers/${c.id}`).set(authed(B.token))).status).toBe(404);
     expect((await api().post(`/api/v1/customers/${c.id}/archive`).set(authed(B.token))).status).toBe(404);
     expect((await api().get(`/api/v1/customers/${c.id}/pdf`).set(authed(B.token))).status).toBe(404);
@@ -107,8 +107,8 @@ describe('clients : isolation et permissions', () => {
     expect((await mk(view, { name: 'Nope nope' })).status).toBe(403);
     expect((await api().get('/api/v1/customers').set(authed(create))).status).toBe(403);
     expect((await mk(create, { name: 'Créé par c' })).status).toBe(201);
-    expect((await api().put(`/api/v1/customers/${c.id}`).set(authed(view)).send({ phone: '1' })).status).toBe(403);
-    expect((await api().put(`/api/v1/customers/${c.id}`).set(authed(upd)).send({ phone: '1' })).status).toBe(200);
+    expect((await api().put(`/api/v1/customers/${c.id}`).set(authed(view)).send({ phone: '+21671000001' })).status).toBe(403);
+    expect((await api().put(`/api/v1/customers/${c.id}`).set(authed(upd)).send({ phone: '+21671000001' })).status).toBe(200);
     expect((await api().post(`/api/v1/customers/${c.id}/archive`).set(authed(view))).status).toBe(403);
     expect((await api().delete(`/api/v1/customers/${c.id}`).set(authed(upd))).status).toBe(403);
     expect((await api().get('/api/v1/customers/export').set(authed(create))).status).toBe(403);
@@ -134,11 +134,11 @@ describe('clients : liste, filtres, exports', () => {
     const x = await api().get('/api/v1/customers/export?format=xlsx&debtors=true').set(authed(B.token)).buffer().parse(binaryParser);
     expect(x.status).toBe(200); expect(x.headers['content-type']).toMatch(/spreadsheetml/); expect(x.headers['content-disposition']).toMatch(/clients-debiteurs-.*\.xlsx/);
     const rows = await parseXlsx(x.body as Buffer);
-    expect(rows[0]![0]).toBe('Raison sociale'); expect(rows).toHaveLength(6); // en-tête + 5 débiteurs
-    expect(rows.some((r) => r[0]!.startsWith("'=HYPERLINK"))).toBe(true);
-    expect(rows.find((r) => r[0] === 'Client 07')![8]).toBe('7.000');
+    expect(rows[0]![1]).toBe('Raison sociale / Nom'); expect(rows).toHaveLength(6); // en-tête + 5 débiteurs
+    expect(rows.some((r) => r[1]!.startsWith("'=HYPERLINK"))).toBe(true);
+    expect(rows.find((r) => r[1] === 'Client 07')![10]).toBe('7.000');
     const csv = await api().get('/api/v1/customers/export?format=csv').set(authed(B.token)).buffer().parse(binaryParser);
-    const text = (csv.body as Buffer).toString('utf8'); expect(text.charCodeAt(0)).toBe(0xfeff); expect(text).toContain('Raison sociale;Matricule fiscal'); expect(text).toContain("'=HYPERLINK");
+    const text = (csv.body as Buffer).toString('utf8'); expect(text.charCodeAt(0)).toBe(0xfeff); expect(text).toContain('Code;Raison sociale / Nom;Type;Matricule fiscal'); expect(text).toContain("'=HYPERLINK");
     const pdf = await api().get('/api/v1/customers/export?format=pdf').set(authed(B.token)).buffer().parse(binaryParser);
     expect((pdf.body as Buffer).subarray(0, 4).toString()).toBe('%PDF');
     expect((await api().get('/api/v1/customers/export?format=exe').set(authed(B.token))).status).toBe(422);

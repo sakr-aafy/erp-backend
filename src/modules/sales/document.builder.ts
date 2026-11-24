@@ -1,3 +1,4 @@
+import { effectiveStatus, STATUS_LABEL } from '../customers/customer.service.js';
 import type { ClientSession, Types } from 'mongoose';
 import { z } from 'zod';
 import { Customer } from '../../models/customer.model.js';
@@ -38,7 +39,7 @@ export interface BuiltLine {
 }
 export interface BuiltDocument {
   customer: { _id: Id; name: string; taxId?: string | null | undefined; address?: unknown; paymentDelayDays?: number | null | undefined };
-  customerSnapshot: { name: string; taxId?: string | undefined; address?: unknown };
+  customerSnapshot: { name: string; code?: string | undefined; taxId?: string | undefined; address?: unknown; shippingAddress?: unknown };
   lines: BuiltLine[]; globalDiscountPct: number; globalDiscountMinor: number; withholdingOperationType?: string | undefined;
   withholding?: { ruleId: Id; code: string; ratePct: number; base: 'ht' | 'ttc'; amountMinor: number } | undefined;
   stamp?: { ruleId: Id; code: string; amountMinor: number } | undefined; totals: DocTotals;
@@ -53,7 +54,8 @@ export async function buildDocument(companyId: Id, docType: DocType, input: DocI
   const { date, session } = opts;
   const customer = await Customer.findOne({ _id: input.customerId, companyId }).session(session ?? null).lean();
   if (!customer) throw AppError.badRequest('Client invalide');
-  if (customer.isArchived && !opts.allowArchivedCustomer) throw AppError.conflict('Client archivé : impossible de créer un document');
+  const st = effectiveStatus(customer);
+  if (st !== 'active' && !opts.allowArchivedCustomer) throw new AppError(409, `Client ${STATUS_LABEL[st].toLowerCase()} : impossible de créer un document`, `CUSTOMER_${st.toUpperCase()}`);
 
   const productIds = [...new Set(input.lines.map((l) => l.productId).filter(Boolean) as string[])];
   const products = productIds.length ? await Product.find({ _id: { $in: productIds }, companyId }).session(session ?? null).populate('unitId', 'code').lean() : [];
@@ -97,7 +99,8 @@ export async function buildDocument(companyId: Id, docType: DocType, input: DocI
   result.lines.forEach((r, i) => Object.assign(built[i]!, r));
   return {
     customer: { _id: customer._id, name: customer.name, taxId: customer.taxId, address: customer.address, paymentDelayDays: customer.paymentDelayDays },
-    customerSnapshot: { name: customer.name, ...(customer.taxId && { taxId: customer.taxId }), address: customer.address },
+    customerSnapshot: { name: customer.name, ...(customer.code && { code: customer.code }), ...(customer.taxId && { taxId: customer.taxId }), address: customer.address,
+      ...(customer.shippingSameAsBilling === false && customer.shippingAddress ? { shippingAddress: customer.shippingAddress } : {}) },
     lines: built, globalDiscountPct: input.globalDiscountPct ?? 0, globalDiscountMinor: input.globalDiscountMinor ?? 0,
     ...(input.withholdingOperationType && { withholdingOperationType: input.withholdingOperationType }), withholding, stamp, totals: result.totals,
   };

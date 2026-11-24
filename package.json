@@ -19,7 +19,8 @@
     "db:e2e-reset": "tsx src/scripts/e2e-reset.ts",
     "perf": "tsx src/scripts/perf-measure.ts",
     "perf:explain": "tsx src/scripts/perf-explain.ts",
-    "lint": "eslint src tests"
+    "lint": "eslint src tests",
+    "db:migrate-customers": "tsx src/scripts/migrate-customers.ts"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",

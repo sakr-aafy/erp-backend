@@ -23,6 +23,13 @@ const tests: T[] = [
   { name: 'EXPORT xlsx sales-by-product', path: `/reports/sales-by-product/export?format=xlsx&${R}`, budgetMs: 4000 }, { name: 'EXPORT xlsx stock-by-warehouse (6 000 lignes)', path: '/reports/stock-by-warehouse/export?format=xlsx', budgetMs: 5000 },
   { name: 'EXPORT csv purchase-invoices', path: `/reports/purchase-invoices/export?format=csv&${R}`, budgetMs: 3000 }, { name: 'EXPORT pdf sales-by-customer', path: `/reports/sales-by-customer/export?format=pdf&${R}`, budgetMs: 4000 },
 ];
+// Fiche client : onglets mesurés sur le client le plus actif (plus gros solde)
+const top = ((await (await fetch(`${API}/api/v1/customers?sort=-balanceMinor&limit=1`, { headers: { Authorization: `Bearer ${token}` } })).json()) as { items: { id: string }[] }).items[0];
+if (top) tests.push(
+  { name: 'GET /customers (filtres type+statut+ville)', path: '/customers?type=company&status=active&city=Tunis&limit=20', budgetMs: 200 }, { name: 'GET /customers?sort=-code', path: '/customers?sort=-code&limit=20', budgetMs: 200 },
+  { name: 'GET /customers/:id/summary', path: `/customers/${top.id}/summary`, budgetMs: 500 }, { name: 'GET /customers/:id/transactions', path: `/customers/${top.id}/transactions?limit=20`, budgetMs: 400 },
+  { name: 'GET /customers/:id/payments', path: `/customers/${top.id}/payments`, budgetMs: 500 }, { name: 'GET /customers/:id/activities', path: `/customers/${top.id}/activities`, budgetMs: 400 },
+  { name: 'GET /customers/:id/documents', path: `/customers/${top.id}/documents`, budgetMs: 200 }, { name: 'EXPORT csv relevé client', path: `/customers/${top.id}/statement?format=csv`, budgetMs: 800 });
 const pctl = (a: number[], p: number) => a[Math.min(a.length - 1, Math.floor((p / 100) * a.length))]!;
 const rows: string[] = []; let over = 0;
 for (const t of tests) {

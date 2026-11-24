@@ -74,7 +74,7 @@ export function toPdfFiche(title: string, sections: FicheSection[]): Promise<Buf
   doc.font('Helvetica-Bold').fontSize(20).text(title); doc.moveDown();
   for (const s of sections) {
     if (doc.y > doc.page.height - 120) doc.addPage();
-    doc.font('Helvetica-Bold').fontSize(12).fillColor('#1f4fbf').text(s.title).fillColor('#000'); doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke('#ccc'); doc.moveDown(0.4);
+    doc.font('Helvetica-Bold').fontSize(12).fillColor('#015581').text(s.title).fillColor('#000'); doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke('#ccc'); doc.moveDown(0.4);
     for (const [k, v] of s.rows) {
       const y = doc.y; doc.font('Helvetica').fontSize(10).fillColor('#666').text(k, 50, y, { width: 150 });
       doc.fillColor('#000').text(v || '—', 210, y, { width: 335 }); doc.y = Math.max(doc.y, y + 14);

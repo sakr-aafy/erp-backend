@@ -6,29 +6,35 @@ import * as svc from './customer.service.js';
 
 const cid = (req: Request) => req.auth!.companyId;
 const pid = (req: Request) => req.params.id as string;
+export const actor = (req: Request): svc.Actor => ({ userId: req.auth!.userId, name: req.auth!.name });
 
 export const list = async (req: Request, res: Response) => res.json(await svc.list(cid(req), req.query as never));
 export const get = async (req: Request, res: Response) => res.json(await svc.get(cid(req), pid(req)));
 export async function create(req: Request, res: Response) {
-  const c = await svc.create(cid(req), req.body);
+  const c = await svc.create(cid(req), req.body, actor(req));
   await audit(req, { action: 'create', resource: 'customer', resourceId: c.id, meta: { name: c.name } });
   res.status(201).json(c);
 }
 export async function update(req: Request, res: Response) {
   const before = await svc.get(cid(req), pid(req));
-  const c = await svc.update(cid(req), pid(req), req.body);
+  const c = await svc.update(cid(req), pid(req), req.body, actor(req));
   const changed = Object.keys(req.body);
   // Les changements de limite de crédit sont sensibles : valeur avant/après tracée
   await audit(req, { action: 'update', resource: 'customer', resourceId: c.id, meta: { fields: changed, ...('creditLimitMinor' in req.body && { creditLimit: { from: before.creditLimitMinor, to: c.creditLimitMinor } }) } });
   res.json(c);
 }
 export async function archive(req: Request, res: Response) {
-  const c = await svc.setArchived(cid(req), pid(req), true);
+  const c = await svc.setStatus(cid(req), pid(req), 'archived', actor(req));
   await audit(req, { action: 'archive', resource: 'customer', resourceId: c.id }); res.json(c);
 }
 export async function reactivate(req: Request, res: Response) {
-  const c = await svc.setArchived(cid(req), pid(req), false);
+  const c = await svc.setStatus(cid(req), pid(req), 'active', actor(req));
   await audit(req, { action: 'reactivate', resource: 'customer', resourceId: c.id }); res.json(c);
+}
+export async function setStatus(req: Request, res: Response) {
+  const before = await svc.get(cid(req), pid(req));
+  const c = await svc.setStatus(cid(req), pid(req), req.body.status, actor(req), req.body.reason);
+  await audit(req, { action: 'status', resource: 'customer', resourceId: c.id, meta: { from: before.status, to: c.status, ...(req.body.reason && { reason: req.body.reason }) } }); res.json(c);
 }
 export async function remove(req: Request, res: Response) {
   const c = await svc.getOwn(cid(req), pid(req));
@@ -37,11 +43,11 @@ export async function remove(req: Request, res: Response) {
   res.status(204).end();
 }
 
-const decimalsOf = async (req: Request) => {
+export const decimalsOf = async (req: Request) => {
   const s = await Setting.findOne({ companyId: cid(req) }).lean();
   return s?.currencies.find((c) => c.code === s.baseCurrency)?.decimals ?? 3;
 };
-const send = (res: Response, r: { body: Buffer; contentType: string; filename: string }) => {
+export const send = (res: Response, r: { body: Buffer; contentType: string; filename: string }) => {
   res.setHeader('Content-Type', r.contentType);
   res.setHeader('Content-Disposition', `attachment; filename="${r.filename}"`);
   res.setHeader('Cache-Control', 'no-store');
@@ -60,13 +66,13 @@ export async function exportList(req: Request, res: Response) {
 export async function fichePdf(req: Request, res: Response) {
   const c = await svc.get(cid(req), pid(req)); const d = await decimalsOf(req);
   const m = (v: number | null) => (v == null ? 'Illimitée' : (v / 10 ** d).toFixed(d));
-  const a = c.address as { street?: string; city?: string; postalCode?: string; country?: string };
+  const line = (a: { street: string; city: string; postalCode: string; country: string }) => [a.street, [a.postalCode, a.city].filter(Boolean).join(' '), a.country].filter(Boolean).join(', ');
   const body = await toPdfFiche(`Fiche client — ${c.name}`, [
-    { title: 'Identification', rows: [['Raison sociale', c.name], ['Matricule fiscal', c.taxId ?? ''], ['Statut', c.isArchived ? 'Archivé' : 'Actif']] },
-    { title: 'Coordonnées', rows: [['Adresse', [a.street, a.postalCode, a.city, a.country].filter(Boolean).join(', ')], ['Téléphone', c.phone ?? ''], ['E-mail', c.email ?? '']] },
-    { title: 'Conditions commerciales', rows: [['Conditions de paiement', c.paymentTerms ?? ''], ['Délai de paiement', `${c.paymentDelayDays} jour(s)`], ['Limite de crédit', m(c.creditLimitMinor)], ['Solde courant', m(c.balanceMinor)]] },
+    { title: 'Identification', rows: [['Code client', c.code ?? ''], ['Type', c.type === 'walk_in' ? 'Passager' : 'Société'], ['Raison sociale', c.name], ['Nom commercial', c.tradeName ?? ''], ['Matricule fiscal', c.taxId ?? ''], ['Registre de commerce', c.registryNumber ?? ''], ['Secteur d’activité', c.sector ?? ''], ['Statut', c.statusLabel]] },
+    { title: 'Coordonnées', rows: [['Adresse de facturation', line(c.address)], ['Adresse de livraison', c.shippingSameAsBilling ? 'Identique à la facturation' : line(c.shippingAddress)], ['Téléphone', c.phone ?? ''], ['Téléphone secondaire', c.secondaryPhone ?? ''], ['E-mail', c.email ?? ''], ['Site Internet', c.website ?? ''], ['Facebook', c.social.facebook ?? ''], ['LinkedIn', c.social.linkedin ?? ''], ['Instagram', c.social.instagram ?? ''], ['Localisation', c.mapsUrl ?? '']] },
+    { title: 'Conditions commerciales', rows: [['Conditions de paiement', c.paymentTerms ?? ''], ['Délai de paiement', `${c.paymentDelayDays} jour(s)`], ['Mode de paiement habituel', c.paymentMethod ?? ''], ['Remise habituelle', `${c.discountPct} %`], ['Limite de crédit', m(c.creditLimitMinor)], ['Solde courant', m(c.balanceMinor)], ['Retenue à la source', c.subjectToWithholding ? 'Oui' : 'Non'], ['Exonéré du timbre', c.stampExempt ? 'Oui' : 'Non']] },
     { title: 'Contacts', rows: c.contacts.length ? c.contacts.map((k) => [k.name + (k.isPrimary ? ' (principal)' : ''), [k.role, k.phone, k.email].filter(Boolean).join(' · ')] as [string, string]) : [['—', 'Aucun contact']] },
   ]);
   await audit(req, { action: 'print', resource: 'customer', resourceId: c.id });
-  send(res, { body, contentType: 'application/pdf', filename: `fiche-client-${c.id}.pdf` });
+  send(res, { body, contentType: 'application/pdf', filename: `fiche-client-${c.code ?? c.id}.pdf` });
 }

@@ -49,7 +49,7 @@ export function createApp() {
   app.set('trust proxy', 1);
   app.disable('x-powered-by');
   app.use(helmet());
-  app.use(cors({ origin: env.CORS_ORIGIN.split(','), credentials: true }));
+  app.use(cors({ origin: env.CORS_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean), credentials: true }));
   app.use(pinoHttp({ logger, autoLogging: env.NODE_ENV !== 'test' }));
   app.use(rateLimit({ windowMs: 60_000, limit: env.NODE_ENV === 'test' ? 100_000 : env.RATE_LIMIT_PER_MIN, standardHeaders: true, legacyHeaders: false }));
   app.use(express.json({ limit: '1mb' }));
