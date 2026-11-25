@@ -65,6 +65,7 @@ const purchaseOrderSchema = new Schema({
 purchaseOrderSchema.index({ companyId: 1, number: 1 }, { unique: true });
 purchaseOrderSchema.index({ companyId: 1, status: 1, orderDate: -1 });
 purchaseOrderSchema.index({ companyId: 1, supplierId: 1 });
+purchaseOrderSchema.index({ companyId: 1, 'lines.productId': 1 });
 export type PurchaseOrderDoc = InferSchemaType<typeof purchaseOrderSchema>;
 export const PurchaseOrder = model('PurchaseOrder', purchaseOrderSchema);
 
@@ -78,6 +79,7 @@ const goodsReceiptSchema = new Schema({
 goodsReceiptSchema.index({ companyId: 1, number: 1 }, { unique: true });
 goodsReceiptSchema.index({ companyId: 1, purchaseOrderId: 1 });
 goodsReceiptSchema.index({ companyId: 1, importFileId: 1 });
+goodsReceiptSchema.index({ companyId: 1, 'lines.productId': 1 });
 export type GoodsReceiptDoc = InferSchemaType<typeof goodsReceiptSchema>;
 export const GoodsReceipt = model('GoodsReceipt', goodsReceiptSchema);
 
@@ -92,6 +94,7 @@ const purchaseInvoiceSchema = new Schema({
 purchaseInvoiceSchema.index({ companyId: 1, number: 1 }, { unique: true, partialFilterExpression: { number: { $type: 'string' } } });
 purchaseInvoiceSchema.index({ companyId: 1, supplierId: 1, supplierInvoiceNumber: 1 }, { unique: true });
 purchaseInvoiceSchema.index({ companyId: 1, status: 1, invoiceDate: -1 });
+purchaseInvoiceSchema.index({ companyId: 1, 'lines.productId': 1 });
 export type PurchaseInvoiceDoc = InferSchemaType<typeof purchaseInvoiceSchema>;
 export const PurchaseInvoice = model('PurchaseInvoice', purchaseInvoiceSchema);
 
@@ -124,7 +127,10 @@ const importFileSchema = new Schema({
   exchangeRate: { type: Number, required: true }, exchangeRateDate: { type: Date, required: true }, orderDate: { type: Date, required: true }, reference: String,
   status: { type: String, enum: IMPORT_STATUSES, default: 'draft' },
   lines: [new Schema({ productId: oid('Product', true), reference: String, designation: String, quantity: { type: Number, required: true }, unitPriceMinor: { type: Number, required: true, min: 0 }, // en devise étrangère (plus petite unité)
-    fobBaseMinor: { type: Number, default: 0 }, allocatedChargesMinor: { type: Number, default: 0 }, landedTotalMinor: { type: Number, default: 0 }, unitLandedMinor: { type: Number, default: 0 }, serials: [String] }, { _id: true })],
+    fobBaseMinor: { type: Number, default: 0 }, allocatedChargesMinor: { type: Number, default: 0 }, landedTotalMinor: { type: Number, default: 0 }, unitLandedMinor: { type: Number, default: 0 }, serials: [String],
+    /** Valeurs douanières et logistiques de l'article À LA DATE d'ajout au dossier (instantané : une modification ultérieure de l'article ne change jamais un dossier). */
+    customs: { type: new Schema({ supplierHsCode: String, tnHsCode: String, ddPct: Number, fodecPct: Number, rpdPct: Number, originCountry: String, provenanceCountry: String, specialRegulation: String, vatRateCode: String, capturedAt: Date }, { _id: false }) },
+    packaging: { type: new Schema({ unitVolumeM3: Number, unitNetWeightKg: Number, unitGrossWeightKg: Number, packagingType: String, parcelCount: Number }, { _id: false }) } }, { _id: true })],
   charges: [new Schema({ type: { type: String, enum: CHARGE_TYPES, required: true }, label: String, amountMinor: { type: Number, required: true, min: 0 }, currency: { type: String, uppercase: true, required: true }, exchangeRate: { type: Number, required: true },
     rateDate: Date, amountBaseMinor: { type: Number, default: 0 }, allocation: { type: String, enum: ['value', 'quantity'], default: 'value' }, date: Date }, { _id: true })],
   documents: [new Schema({ name: { type: String, required: true }, kind: { type: String, default: 'other' }, status: { type: String, enum: ['pending', 'received'], default: 'pending' }, fileName: String, storedName: String, mime: String, size: Number, uploadedAt: Date }, { _id: true })],
@@ -134,6 +140,7 @@ const importFileSchema = new Schema({
 importFileSchema.index({ companyId: 1, number: 1 }, { unique: true });
 importFileSchema.index({ companyId: 1, status: 1, orderDate: -1 });
 importFileSchema.index({ companyId: 1, supplierId: 1 });
+importFileSchema.index({ companyId: 1, 'lines.productId': 1 });
 export type ImportFileDoc = InferSchemaType<typeof importFileSchema>;
 export const ImportFile = model('ImportFile', importFileSchema);
 

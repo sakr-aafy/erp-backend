@@ -1,3 +1,4 @@
+import { enforcePriceRules } from '../products/product.rules.js';
 import { Router, type Request, type Response } from 'express';
 import { asyncHandler as h } from '../../utils/async-handler.js';
 import { validate } from '../../middlewares/validate.js';
@@ -13,12 +14,12 @@ export const quotationRoutes = Router();
 quotationRoutes.use(authenticate);
 quotationRoutes.get('/', can('quotations:view'), validate({ query: v.listQuery }), h(async (req: Request, res: Response) => res.json(await svc.list(cid(req), req.query as never))));
 quotationRoutes.get('/stats', can('quotations:view'), h(async (req: Request, res: Response) => res.json(await svc.stats(cid(req)))));
-quotationRoutes.post('/', can('quotations:create'), validate({ body: v.quotationBody }), h(async (req: Request, res: Response) => {
+quotationRoutes.post('/', can('quotations:create'), validate({ body: v.quotationBody }), enforcePriceRules, h(async (req: Request, res: Response) => {
   const q = await svc.create(cid(req), uid(req), req.body);
   await audit(req, { action: 'create', resource: 'quotation', resourceId: q.id, meta: { number: q.number, totalTtcMinor: q.totals.totalTtcMinor } }); res.status(201).json(q);
 }));
 quotationRoutes.get('/:id', can('quotations:view'), validate({ params: idParam }), h(async (req: Request, res: Response) => res.json(await svc.get(cid(req), pid(req)))));
-quotationRoutes.put('/:id', can('quotations:update'), validate({ params: idParam, body: v.quotationBody }), h(async (req: Request, res: Response) => {
+quotationRoutes.put('/:id', can('quotations:update'), validate({ params: idParam, body: v.quotationBody }), enforcePriceRules, h(async (req: Request, res: Response) => {
   const q = await svc.update(cid(req), pid(req), req.body); await audit(req, { action: 'update', resource: 'quotation', resourceId: q.id, meta: { number: q.number, totalTtcMinor: q.totals.totalTtcMinor } }); res.json(q);
 }));
 quotationRoutes.delete('/:id', can('quotations:delete'), validate({ params: idParam }), h(async (req: Request, res: Response) => {

@@ -53,7 +53,7 @@ export async function saveRate(companyId: Id, b: z.infer<typeof rateBody>) {
 export function toDto(f: Lean) {
   return { id: f._id.toString(), number: f.number, status: f.status, supplierId: f.supplierId.toString(), supplier: f.supplier, currency: f.currency, exchangeRate: f.exchangeRate, exchangeRateDate: f.exchangeRateDate, orderDate: f.orderDate, reference: f.reference ?? null, notes: f.notes ?? null,
     lines: f.lines.map((l) => ({ id: (l as { _id: Id })._id.toString(), productId: l.productId!.toString(), reference: l.reference ?? null, designation: l.designation ?? null, quantity: l.quantity, unitPriceMinor: l.unitPriceMinor, fobBaseMinor: l.fobBaseMinor ?? 0,
-      allocatedChargesMinor: l.allocatedChargesMinor ?? 0, landedTotalMinor: l.landedTotalMinor ?? 0, unitLandedMinor: l.unitLandedMinor ?? 0, serials: l.serials ?? [] })),
+      allocatedChargesMinor: l.allocatedChargesMinor ?? 0, landedTotalMinor: l.landedTotalMinor ?? 0, unitLandedMinor: l.unitLandedMinor ?? 0, serials: l.serials ?? [], customs: l.customs ?? null, packaging: l.packaging ?? null })),
     charges: f.charges.map((c) => ({ id: (c as { _id: Id })._id.toString(), type: c.type, label: c.label ?? null, amountMinor: c.amountMinor, currency: c.currency, exchangeRate: c.exchangeRate, rateDate: c.rateDate ?? null, amountBaseMinor: c.amountBaseMinor ?? 0, allocation: c.allocation, date: c.date ?? null })),
     documents: f.documents.map((d) => ({ id: (d as { _id: Id })._id.toString(), name: d.name, kind: d.kind, status: d.status, fileName: d.fileName ?? null, hasFile: !!d.storedName, size: d.size ?? null })),
     totals: f.totals, warehouseId: f.warehouseId?.toString() ?? null, receiptId: f.receiptId?.toString() ?? null, closedAt: f.closedAt ?? null, integratedAt: f.integratedAt ?? null,
@@ -79,7 +79,13 @@ export const get = async (c: Id, id: string) => toDto((await getOwn(c, id)).toOb
 
 async function buildLines(companyId: Id, lines: z.infer<typeof lineBody>[]) {
   const ps = await Product.find({ companyId, _id: { $in: lines.map((l) => l.productId) } }).lean(); const by = new Map(ps.map((p) => [p._id.toString(), p]));
-  return lines.map((l) => { const p = by.get(l.productId); if (!p) throw AppError.badRequest('Article introuvable'); if (p.kind === 'service') throw AppError.badRequest(`« ${p.reference} » est un service : non importable en stock`); return { productId: p._id, reference: p.reference, designation: p.name, quantity: l.quantity, unitPriceMinor: l.unitPriceMinor }; });
+  return lines.map((l) => { const p = by.get(l.productId); if (!p) throw AppError.badRequest('Article introuvable'); if (p.kind === 'service') throw AppError.badRequest(`« ${p.reference} » est un service : non importable en stock`);
+    const st = p.status ?? (p.isActive === false ? 'inactive' : 'active'); if (st !== 'active') throw new AppError(409, `« ${p.reference} » est ${({ inactive: 'inactif', blocked: 'bloqué', archived: 'archivé' } as Record<string, string>)[st] ?? st} : achat à l'importation impossible`, `PRODUCT_${st.toUpperCase()}`);
+    const c = p.customs; const pk = p.packaging;
+    // Instantané des données douanières et logistiques à la date d'ajout : une modification ultérieure de l'article ne change jamais un dossier (clôturé ou non)
+    return { productId: p._id, reference: p.reference, designation: p.name, quantity: l.quantity, unitPriceMinor: l.unitPriceMinor,
+      customs: { supplierHsCode: c?.supplierHsCode, tnHsCode: c?.tnHsCode, ddPct: c?.ddPct, fodecPct: c?.fodecPct, rpdPct: c?.rpdPct, originCountry: c?.originCountry, provenanceCountry: c?.provenanceCountry, specialRegulation: c?.specialRegulation, vatRateCode: p.vatRateCode, capturedAt: new Date() },
+      packaging: { unitVolumeM3: pk?.volumeM3, unitNetWeightKg: pk?.netWeightKg, unitGrossWeightKg: pk?.grossWeightKg, packagingType: pk?.typeLabel ?? pk?.type, parcelCount: pk?.parcelCount } }; });
 }
 export async function create(companyId: Id, userId: Id, b: z.infer<typeof createBody>) {
   const sup = await Supplier.findOne({ _id: b.supplierId, companyId }).lean();

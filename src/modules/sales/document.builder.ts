@@ -1,4 +1,5 @@
 import { effectiveStatus, STATUS_LABEL } from '../customers/customer.service.js';
+import { effectiveStatus as effectiveProductStatus, STATUS_LABEL as PRODUCT_STATUS_LABEL } from '../products/product.service.js';
 import type { ClientSession, Types } from 'mongoose';
 import { z } from 'zod';
 import { Customer } from '../../models/customer.model.js';
@@ -28,6 +29,8 @@ export const docFields = {
   customerId: objectId, lines: z.array(lineBody).min(1, 'Au moins une ligne').max(500),
   globalDiscountPct: z.number().min(0).max(100).default(0), globalDiscountMinor: minorInt.default(0),
   withholdingOperationType: z.string().trim().max(30).optional(), notes: z.string().trim().max(2000).optional(),
+  /** Dérogation aux règles de prix de l'article (prix minimum, remise maximale) : motif obligatoire, permission products:validate, audité. */
+  priceOverrideReason: z.string().trim().min(3).max(300).optional(),
 };
 export type LineInput = z.infer<typeof lineBody> & { vat?: VatSnapshot };
 export interface DocInput { customerId: string | Id; lines: LineInput[]; globalDiscountPct?: number; globalDiscountMinor?: number; withholdingOperationType?: string | null | undefined }
@@ -67,7 +70,7 @@ export async function buildDocument(companyId: Id, docType: DocType, input: DocI
   for (const [i, l] of input.lines.entries()) {
     const p = l.productId ? byId.get(l.productId) : undefined;
     if (l.productId && !p) throw AppError.badRequest(`Ligne ${i + 1} : article introuvable`);
-    if (p && !p.isActive) throw AppError.badRequest(`Ligne ${i + 1} : l'article « ${p.reference} » est désactivé`);
+    if (p && !opts.allowArchivedCustomer) { const st = effectiveProductStatus(p); if (st !== 'active') throw new AppError(409, `Ligne ${i + 1} : l'article « ${p.reference} » est ${PRODUCT_STATUS_LABEL[st].toLowerCase()} : vente impossible`, `PRODUCT_${st.toUpperCase()}`); }
     const designation = l.designation ?? p?.name;
     const unitPriceMinor = l.unitPriceMinor ?? p?.salePriceMinor;
     const vatCode = l.vat?.code ?? l.vatCode ?? p?.vatRateCode; // le code vient de l'article : jamais de taux imposé par défaut

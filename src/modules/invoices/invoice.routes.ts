@@ -1,3 +1,4 @@
+import { enforcePriceRules } from '../products/product.rules.js';
 import { Router, type Request, type Response } from 'express';
 import { asyncHandler as h } from '../../utils/async-handler.js';
 import { validate } from '../../middlewares/validate.js';
@@ -23,11 +24,11 @@ invoiceRoutes.post('/payments/:id/cancel', can('invoices:update'), validate({ pa
 invoiceRoutes.post('/from-delivery-notes', can('invoices:create'), validate({ body: v.fromDeliveryNotesBody }), h(async (req: Request, res: Response) => {
   const i = await svc.createFromDeliveryNotes(cid(req), uid(req), req.body.deliveryNoteIds, req.body.issueDate); await audit(req, { action: 'create', resource: 'invoice', resourceId: i.id, meta: { fromDeliveryNotes: req.body.deliveryNoteIds } }); res.status(201).json(i);
 }));
-invoiceRoutes.post('/', can('invoices:create'), validate({ body: v.invoiceBody }), h(async (req: Request, res: Response) => {
+invoiceRoutes.post('/', can('invoices:create'), validate({ body: v.invoiceBody }), enforcePriceRules, h(async (req: Request, res: Response) => {
   const i = await svc.createDraft(cid(req), uid(req), req.body); await audit(req, { action: 'create', resource: 'invoice', resourceId: i.id, meta: { totalTtcMinor: i.totals.totalTtcMinor } }); res.status(201).json(i);
 }));
 invoiceRoutes.get('/:id', can('invoices:view'), validate({ params: idParam }), h(async (req: Request, res: Response) => res.json(await svc.get(cid(req), pid(req)))));
-invoiceRoutes.put('/:id', can('invoices:update'), validate({ params: idParam, body: v.invoiceBody }), h(async (req: Request, res: Response) => {
+invoiceRoutes.put('/:id', can('invoices:update'), validate({ params: idParam, body: v.invoiceBody }), enforcePriceRules, h(async (req: Request, res: Response) => {
   const i = await svc.updateDraft(cid(req), pid(req), req.body); await audit(req, { action: 'update', resource: 'invoice', resourceId: i.id, meta: { totalTtcMinor: i.totals.totalTtcMinor } }); res.json(i);
 }));
 invoiceRoutes.delete('/:id', can('invoices:delete'), validate({ params: idParam }), h(async (req: Request, res: Response) => {

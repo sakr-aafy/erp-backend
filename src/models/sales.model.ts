@@ -51,6 +51,7 @@ const quotationSchema = new Schema({
 quotationSchema.index({ companyId: 1, number: 1 }, { unique: true });
 quotationSchema.index({ companyId: 1, status: 1, validUntil: 1 });
 quotationSchema.index({ companyId: 1, customerId: 1, issueDate: -1 });
+quotationSchema.index({ companyId: 1, 'lines.productId': 1 }); // fiche article : transactions
 quotationSchema.index({ companyId: 1, issueDate: -1 }); // rapports : devis par période
 export type QuotationDoc = InferSchemaType<typeof quotationSchema>;
 export const Quotation = model('Quotation', quotationSchema);
@@ -64,6 +65,7 @@ const proformaSchema = new Schema({
 proformaSchema.index({ companyId: 1, number: 1 }, { unique: true });
 proformaSchema.index({ companyId: 1, status: 1, validUntil: 1 });
 proformaSchema.index({ companyId: 1, customerId: 1, issueDate: -1 });
+proformaSchema.index({ companyId: 1, 'lines.productId': 1 });
 export type ProformaDoc = InferSchemaType<typeof proformaSchema>;
 export const Proforma = model('Proforma', proformaSchema);
 
@@ -89,6 +91,7 @@ invoiceSchema.index({ companyId: 1, customerId: 1, status: 1 });
 invoiceSchema.index({ companyId: 1, customerId: 1, issueDate: -1 }); // fiche client : historique par date
 invoiceSchema.index({ companyId: 1, paymentStatus: 1, 'schedule.dueDate': 1 });
 invoiceSchema.index({ companyId: 1, creditedInvoiceId: 1 });
+invoiceSchema.index({ companyId: 1, 'lines.productId': 1 });
 export type InvoiceDoc = InferSchemaType<typeof invoiceSchema>;
 export const Invoice = model('Invoice', invoiceSchema);
 
@@ -124,5 +127,6 @@ deliveryNoteSchema.index({ companyId: 1, status: 1, deliveryDate: -1 });
 deliveryNoteSchema.index({ companyId: 1, customerId: 1, status: 1 });
 deliveryNoteSchema.index({ companyId: 1, customerId: 1, deliveryDate: -1 }); // fiche client : historique par date
 deliveryNoteSchema.index({ companyId: 1, 'source.id': 1 });
+deliveryNoteSchema.index({ companyId: 1, 'lines.productId': 1 });
 export type DeliveryNoteDoc = InferSchemaType<typeof deliveryNoteSchema>;
 export const DeliveryNote = model('DeliveryNote', deliveryNoteSchema);

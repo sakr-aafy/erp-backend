@@ -20,7 +20,8 @@
     "perf": "tsx src/scripts/perf-measure.ts",
     "perf:explain": "tsx src/scripts/perf-explain.ts",
     "lint": "eslint src tests",
-    "db:migrate-customers": "tsx src/scripts/migrate-customers.ts"
+    "db:migrate-customers": "tsx src/scripts/migrate-customers.ts",
+    "db:migrate-products": "tsx src/scripts/migrate-products.ts"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",

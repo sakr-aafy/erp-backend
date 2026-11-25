@@ -1,3 +1,4 @@
+import { enforcePriceRules } from '../products/product.rules.js';
 import { Router, type Request, type Response } from 'express';
 import { asyncHandler as h } from '../../utils/async-handler.js';
 import { validate } from '../../middlewares/validate.js';
@@ -15,11 +16,11 @@ export const proformaRoutes = Router();
 proformaRoutes.use(authenticate);
 proformaRoutes.get('/', can('proformas:view'), validate({ query: v.listQuery }), h(async (req: Request, res: Response) => res.json(await svc.list(cid(req), req.query as never))));
 proformaRoutes.get('/stats', can('proformas:view'), h(async (req: Request, res: Response) => res.json(await svc.stats(cid(req)))));
-proformaRoutes.post('/', can('proformas:create'), validate({ body: v.proformaBody }), h(async (req: Request, res: Response) => {
+proformaRoutes.post('/', can('proformas:create'), validate({ body: v.proformaBody }), enforcePriceRules, h(async (req: Request, res: Response) => {
   const p = await svc.create(cid(req), uid(req), req.body); await audit(req, { action: 'create', resource: 'proforma', resourceId: p.id, meta: { number: p.number, totalTtcMinor: p.totals.totalTtcMinor } }); res.status(201).json(p);
 }));
 proformaRoutes.get('/:id', can('proformas:view'), validate({ params: idParam }), h(async (req: Request, res: Response) => res.json(await svc.get(cid(req), pid(req)))));
-proformaRoutes.put('/:id', can('proformas:update'), validate({ params: idParam, body: v.proformaBody }), h(async (req: Request, res: Response) => {
+proformaRoutes.put('/:id', can('proformas:update'), validate({ params: idParam, body: v.proformaBody }), enforcePriceRules, h(async (req: Request, res: Response) => {
   const p = await svc.update(cid(req), pid(req), req.body); await audit(req, { action: 'update', resource: 'proforma', resourceId: p.id, meta: { number: p.number, totalTtcMinor: p.totals.totalTtcMinor } }); res.json(p);
 }));
 proformaRoutes.post('/:id/cancel', can('proformas:update'), validate({ params: idParam }), h(async (req: Request, res: Response) => {

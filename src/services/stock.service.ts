@@ -39,6 +39,16 @@ export async function defaultWarehouseId(companyId: Id, session?: ClientSession)
  *  - stock négatif interdit sauf `allowNegative` (la part manquante est alors valorisée au coût de revient de l'article).
  * Doit être appelé DANS une transaction.
  */
+/**
+ * Conséquences du statut de l'article sur le stock : livraison (vente) = actif seulement ; réception, importation et entrée manuelle = actif ou inactif ;
+ * transferts, inventaires, sorties manuelles = tout sauf archivé ; l'annulation d'une livraison reste toujours possible (correction d'une opération passée).
+ */
+function assertProductAllows(p: { reference: string; status?: string | null | undefined; isActive?: boolean | null | undefined }, reason: MovementReason) {
+  const st = p.status ?? (p.isActive === false ? 'inactive' : 'active');
+  const ok = reason === 'delivery' ? st === 'active' : reason === 'receipt' || reason === 'import' || reason === 'manual_in' ? st === 'active' || st === 'inactive' : reason === 'delivery_cancel' ? true : st !== 'archived';
+  if (!ok) { const label = ({ inactive: 'inactif', blocked: 'bloqué', archived: 'archivé' } as Record<string, string>)[st] ?? st; throw new AppError(409, `Article « ${p.reference} » ${label} : opération de stock impossible`, `PRODUCT_${st.toUpperCase()}`); }
+}
+
 export async function applyMovement(inp: MovementInput): Promise<MovementResult> {
   const { companyId, session } = inp;
   const existing = await StockMovement.findOne({ companyId, eventKey: inp.eventKey }).session(session);
@@ -47,6 +57,7 @@ export async function applyMovement(inp: MovementInput): Promise<MovementResult>
   const product = await Product.findOne({ _id: inp.productId, companyId }).session(session).lean();
   if (!product) throw AppError.notFound('Article introuvable');
   if (product.kind === 'service') return { movement: null, duplicate: false, skipped: 'service', belowMin: false };
+  assertProductAllows(product, inp.reason);
   if (!(await Warehouse.exists({ _id: inp.warehouseId, companyId }).session(session))) throw AppError.badRequest('Magasin invalide');
   if (product.hasSerial && Math.abs(inp.quantity - Math.round(inp.quantity)) > 1e-9) throw AppError.badRequest(`« ${product.reference} » : quantité entière requise (articles suivis par numéro de série)`);
 

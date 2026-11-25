@@ -35,7 +35,7 @@ export const get = async (c: Id, id: string) => toDto(await getOwn(c, id));
 export async function create(companyId: Id, userId: Id, b: Body) {
   const date = startOfDay(b.orderDate ?? new Date()); await ensureCounter(companyId, 'purchaseOrder', date);
   return withTransaction(async (session) => {
-    const sup = await loadSupplier(companyId, b.supplierId, session); const built = await buildPurchaseLines(companyId, b.lines, date, session);
+    const sup = await loadSupplier(companyId, b.supplierId, session); const built = await buildPurchaseLines(companyId, b.lines, date, session, { checkStatus: true });
     const number = await nextDocumentNumber(companyId, 'purchaseOrder', session, date);
     const [o] = await PurchaseOrder.create([{ companyId, number, supplierId: sup._id, supplier: { name: sup.name, taxId: sup.taxId }, orderDate: date, expectedDate: b.expectedDate, lines: built.lines, totals: built.totals, notes: b.notes, createdBy: userId }] as never[], { session });
     return toDto(o!.toObject() as Lean);
@@ -45,7 +45,7 @@ export async function update(companyId: Id, id: string, b: Body) {
   const cur = await getOwn(companyId, id); if (cur.status !== 'draft') throw AppError.conflict('Seule une commande en brouillon est modifiable');
   const date = startOfDay(b.orderDate ?? cur.orderDate);
   return withTransaction(async (session) => {
-    const sup = await loadSupplier(companyId, b.supplierId, session); const built = await buildPurchaseLines(companyId, b.lines, date, session);
+    const sup = await loadSupplier(companyId, b.supplierId, session); const built = await buildPurchaseLines(companyId, b.lines, date, session, { checkStatus: true });
     const u = await PurchaseOrder.findOneAndUpdate({ _id: id, companyId, status: 'draft' }, { $set: { supplierId: sup._id, supplier: { name: sup.name, taxId: sup.taxId }, orderDate: date, expectedDate: b.expectedDate, lines: built.lines, totals: built.totals, notes: b.notes } }, { returnDocument: 'after', session }).lean();
     if (!u) throw AppError.conflict('La commande a changé entre-temps'); return toDto(u as Lean);
   });

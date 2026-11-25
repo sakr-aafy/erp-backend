@@ -30,6 +30,15 @@ if (top) tests.push(
   { name: 'GET /customers/:id/summary', path: `/customers/${top.id}/summary`, budgetMs: 500 }, { name: 'GET /customers/:id/transactions', path: `/customers/${top.id}/transactions?limit=20`, budgetMs: 400 },
   { name: 'GET /customers/:id/payments', path: `/customers/${top.id}/payments`, budgetMs: 500 }, { name: 'GET /customers/:id/activities', path: `/customers/${top.id}/activities`, budgetMs: 400 },
   { name: 'GET /customers/:id/documents', path: `/customers/${top.id}/documents`, budgetMs: 200 }, { name: 'EXPORT csv relevé client', path: `/customers/${top.id}/statement?format=csv`, budgetMs: 800 });
+// Fiche article : onglets mesurés sur un article réel de la base de volume
+const prod = ((await (await fetch(`${API}/api/v1/products?limit=1&q=ART-0150`, { headers: { Authorization: `Bearer ${token}` } })).json()) as { items: { id: string }[] }).items[0];
+tests.push(
+  { name: 'GET /products (statut + marque + tri)', path: '/products?status=active&sort=-salePriceMinor&limit=20', budgetMs: 250 }, { name: 'GET /products?stockState=out', path: '/products?stockState=out&limit=20', budgetMs: 1500 }, { name: 'GET /products?stockState=below_min', path: '/products?stockState=below_min&limit=20', budgetMs: 1500 },
+  { name: 'GET /products?q= (code, marque, modèle, fournisseur)', path: '/products?q=ART-01&limit=20', budgetMs: 250 }, { name: 'GET /products/brands', path: '/products/brands', budgetMs: 200 });
+if (prod) tests.push(
+  { name: 'GET /products/:id', path: `/products/${prod.id}`, budgetMs: 250 }, { name: 'GET /products/:id/stock', path: `/products/${prod.id}/stock`, budgetMs: 300 }, { name: 'GET /products/:id/transactions', path: `/products/${prod.id}/transactions?limit=20`, budgetMs: 800 },
+  { name: 'GET /products/:id/documents', path: `/products/${prod.id}/documents`, budgetMs: 300 }, { name: 'GET /products/:id/activities', path: `/products/${prod.id}/activities`, budgetMs: 500 }, { name: 'EXPORT csv transactions article', path: `/products/${prod.id}/transactions/export?format=csv`, budgetMs: 1200 },
+  { name: 'EXPORT xlsx catalogue', path: '/products/export?format=xlsx', budgetMs: 4000 });
 const pctl = (a: number[], p: number) => a[Math.min(a.length - 1, Math.floor((p / 100) * a.length))]!;
 const rows: string[] = []; let over = 0;
 for (const t of tests) {

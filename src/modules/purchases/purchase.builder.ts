@@ -26,7 +26,7 @@ export async function loadSupplier(companyId: Id, id: string | Id, session?: Cli
 }
 
 /** Lignes d'achat : prix d'achat et TVA de l'article par défaut (TVA résolue par les règles fiscales validées), totaux via le service de calcul unique. */
-export async function buildPurchaseLines(companyId: Id, lines: PurchaseLineInput[], date: Date, session?: ClientSession) {
+export async function buildPurchaseLines(companyId: Id, lines: PurchaseLineInput[], date: Date, session?: ClientSession, opts: { checkStatus?: boolean } = {}) {
   const ids = [...new Set(lines.map((l) => l.productId).filter(Boolean) as string[])];
   const products = ids.length ? await Product.find({ _id: { $in: ids }, companyId }).session(session ?? null).populate('unitId', 'code').lean() : [];
   const byId = new Map(products.map((p) => [p._id.toString(), p])); const cache = new Map<string, Awaited<ReturnType<typeof resolveVat>>>();
@@ -34,6 +34,8 @@ export async function buildPurchaseLines(companyId: Id, lines: PurchaseLineInput
   for (const [i, l] of lines.entries()) {
     const p = l.productId ? byId.get(l.productId) : undefined;
     if (l.productId && !p) throw AppError.badRequest(`Ligne ${i + 1} : article introuvable`);
+    // Nouvelle commande : seul un article ACTIF peut être acheté (les factures d'achat d'opérations passées restent enregistrables)
+    if (p && opts.checkStatus) { const st = p.status ?? (p.isActive === false ? 'inactive' : 'active'); if (st !== 'active') throw new AppError(409, `Ligne ${i + 1} : l'article « ${p.reference} » est ${({ inactive: 'inactif', blocked: 'bloqué', archived: 'archivé' } as Record<string, string>)[st] ?? st} : achat impossible`, `PRODUCT_${st.toUpperCase()}`); }
     const designation = l.designation ?? p?.name; const unitPriceMinor = l.unitPriceMinor ?? p?.purchasePriceMinor; const vatCode = (l.vatCode ?? p?.vatRateCode)?.toUpperCase();
     if (!designation) throw AppError.badRequest(`Ligne ${i + 1} : désignation requise`);
     if (unitPriceMinor === undefined) throw AppError.badRequest(`Ligne ${i + 1} : prix unitaire requis`);
