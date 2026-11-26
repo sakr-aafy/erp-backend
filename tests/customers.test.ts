@@ -41,7 +41,7 @@ describe('clients : CRUD et validation', () => {
   it('modifie un client ; la limite de crédit change est tracée avant/après dans l’audit', async () => {
     const c = (await mk(A.token, { name: 'À modifier', creditLimitMinor: 1000 })).body;
     const r = await api().put(`/api/v1/customers/${c.id}`).set(authed(A.token)).send({ creditLimitMinor: 2000, phone: '71000000' });
-    expect(r.status).toBe(200); expect(r.body.creditLimitMinor).toBe(2000); expect(r.body.phone).toBe('71000000');
+    expect(r.status).toBe(200); expect(r.body.creditLimitMinor).toBe(2000); expect(r.body.phone).toBe('+21671000000'); // numéro reconnu : enregistré au format international
     const log = await AuditLog.findOne({ resource: 'customer', action: 'update', resourceId: c.id }).lean();
     expect((log!.meta as { creditLimit: { from: number; to: number } }).creditLimit).toEqual({ from: 1000, to: 2000 });
     const unlimited = await api().put(`/api/v1/customers/${c.id}`).set(authed(A.token)).send({ creditLimitMinor: null });

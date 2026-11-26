@@ -7,6 +7,7 @@ import { objectId } from '../../utils/pagination.js';
 import { minorInt } from '../parties/party.shared.js';
 import { CalculationError, computeDocument, type CalcLine, type DocTotals, type VatRegime } from '../../services/calculation.service.js';
 import { resolveVat } from '../../services/fiscal.service.js';
+import { realPurchaseMinor } from '../products/purchase-price.js';
 
 type Id = Types.ObjectId;
 export const purchaseLineBody = z.object({
@@ -36,7 +37,13 @@ export async function buildPurchaseLines(companyId: Id, lines: PurchaseLineInput
     if (l.productId && !p) throw AppError.badRequest(`Ligne ${i + 1} : article introuvable`);
     // Nouvelle commande : seul un article ACTIF peut être acheté (les factures d'achat d'opérations passées restent enregistrables)
     if (p && opts.checkStatus) { const st = p.status ?? (p.isActive === false ? 'inactive' : 'active'); if (st !== 'active') throw new AppError(409, `Ligne ${i + 1} : l'article « ${p.reference} » est ${({ inactive: 'inactif', blocked: 'bloqué', archived: 'archivé' } as Record<string, string>)[st] ?? st} : achat impossible`, `PRODUCT_${st.toUpperCase()}`); }
-    const designation = l.designation ?? p?.name; const unitPriceMinor = l.unitPriceMinor ?? p?.purchasePriceMinor; const vatCode = (l.vatCode ?? p?.vatRateCode)?.toUpperCase();
+    const designation = l.designation ?? p?.name; const vatCode = (l.vatCode ?? p?.vatRateCode)?.toUpperCase();
+    // Prix proposé par la fiche article au taux RÉEL du jour de l'opération (jamais le taux estimatif)
+    let unitPriceMinor = l.unitPriceMinor;
+    if (unitPriceMinor === undefined && p) {
+      try { unitPriceMinor = await realPurchaseMinor(companyId, p, date, session); }
+      catch (e) { if (e instanceof AppError) throw AppError.badRequest(`Ligne ${i + 1} : ${e.message.replace(' : saisissez le taux', '')} — saisissez le prix unitaire`); throw e; }
+    }
     if (!designation) throw AppError.badRequest(`Ligne ${i + 1} : désignation requise`);
     if (unitPriceMinor === undefined) throw AppError.badRequest(`Ligne ${i + 1} : prix unitaire requis`);
     if (!vatCode) throw AppError.badRequest(`Ligne ${i + 1} : code de TVA requis (aucun taux par défaut)`);

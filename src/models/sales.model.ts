@@ -1,5 +1,6 @@
 import { Schema, model, type InferSchemaType } from 'mongoose';
 import { addressSchema } from '../modules/parties/party.shared.js';
+import { addressSnapshotSchema } from '../modules/parties/delivery-address.js';
 
 const oid = (ref: string, required = false) => ({ type: Schema.Types.ObjectId, ref, required });
 
@@ -40,11 +41,15 @@ const commonDoc = {
   lines: { type: [lineSchema], default: [] }, globalDiscountPct: { type: Number, default: 0 }, globalDiscountMinor: { type: Number, default: 0 },
   withholdingOperationType: String, withholding: withholdingSchema, stamp: stampSchema, totals: { type: totalsSchema, required: true },
   notes: { type: String, trim: true }, createdBy: oid('User'), sentAt: Date,
+  /** Copie de l'adresse de livraison choisie (null : aucune ; absent : document antérieur, voir customerSnapshot.shippingAddress). */
+  deliveryAddress: { type: addressSnapshotSchema },
 };
+/** Conditions de paiement copiées sur le document (devis, proforma, facture). */
+const paymentTermsFields = { paymentTerms: { type: String, trim: true }, paymentTermsCustom: { type: Boolean } };
 
 // ---- Devis ----
 const quotationSchema = new Schema({
-  ...commonDoc, number: { type: String, required: true }, issueDate: { type: Date, required: true }, validUntil: { type: Date, required: true },
+  ...commonDoc, ...paymentTermsFields, number: { type: String, required: true }, issueDate: { type: Date, required: true }, validUntil: { type: Date, required: true },
   status: { type: String, enum: ['pending', 'accepted', 'refused', 'expired'], default: 'pending' }, acceptedAt: Date, refusedAt: Date,
   terms: { type: String, trim: true }, proformaId: oid('Proforma'), invoiceId: oid('Invoice'),
 }, { timestamps: true });
@@ -58,7 +63,7 @@ export const Quotation = model('Quotation', quotationSchema);
 
 // ---- Facture proforma (série de numéros distincte des factures définitives) ----
 const proformaSchema = new Schema({
-  ...commonDoc, number: { type: String, required: true }, issueDate: { type: Date, required: true }, validUntil: { type: Date, required: true },
+  ...commonDoc, ...paymentTermsFields, number: { type: String, required: true }, issueDate: { type: Date, required: true }, validUntil: { type: Date, required: true },
   status: { type: String, enum: ['pending', 'converted', 'expired', 'cancelled'], default: 'pending' },
   quotationId: oid('Quotation'), invoiceId: oid('Invoice'), terms: { type: String, trim: true }, cancelledAt: Date,
 }, { timestamps: true });
@@ -73,7 +78,7 @@ export const Proforma = model('Proforma', proformaSchema);
 /** Échéance : reste dû = montant − payé − crédité (avoirs imputés sur les échéances les plus lointaines d'abord). */
 const scheduleSchema = new Schema({ dueDate: { type: Date, required: true }, percent: Number, amountMinor: { type: Number, default: 0 }, paidMinor: { type: Number, default: 0 }, creditedMinor: { type: Number, default: 0 } }, { _id: true });
 const invoiceSchema = new Schema({
-  ...commonDoc,
+  ...commonDoc, ...paymentTermsFields,
   type: { type: String, enum: ['invoice', 'credit_note'], default: 'invoice' },
   /** Attribué à la VALIDATION (numérotation légale sans trou). Absent en brouillon. */
   number: String,

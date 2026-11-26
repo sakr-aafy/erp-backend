@@ -6,10 +6,13 @@ const categorySchema = new Schema(
     name: { type: String, required: true, trim: true },
     /** null = famille ; renseigné = sous-famille (2 niveaux maximum). */
     parentId: { type: Schema.Types.ObjectId, ref: 'Category', default: null },
+    /** Archivée : conservée sur les articles existants, plus proposée pour de nouveaux. */
+    isArchived: { type: Boolean, default: false }, archivedAt: { type: Date },
   },
   { timestamps: true },
 );
-categorySchema.index({ companyId: 1, parentId: 1, name: 1 }, { unique: true });
+// Unicité par niveau (casse ignorée) : même nom autorisé sous deux catégories différentes
+categorySchema.index({ companyId: 1, parentId: 1, name: 1 }, { unique: true, collation: { locale: 'fr', strength: 2 } });
 export const Category = model('Category', categorySchema);
 
 const unitSchema = new Schema(
@@ -22,15 +25,16 @@ export const Unit = model('Unit', unitSchema);
 export const PRODUCT_STATUSES = ['active', 'inactive', 'archived', 'blocked'] as const;
 export const PACKAGING_TYPES = ['carton', 'wooden_crate', 'pallet', 'plastic_film', 'other'] as const;
 
-/** Dimensions et poids logistiques (réutilisables par le module Importations). Volumes toujours recalculés par le serveur. */
+/** Dimensions et poids logistiques (réutilisables par le module Importations). Volume toujours recalculé par le serveur. */
 const packagingSchema = new Schema({
   lengthMm: { type: Number, min: 0 }, widthMm: { type: Number, min: 0 }, heightMm: { type: Number, min: 0 },
   netWeightKg: { type: Number, min: 0 }, grossWeightKg: { type: Number, min: 0 },
   type: { type: String, enum: PACKAGING_TYPES }, typeLabel: { type: String, trim: true },
-  parcelCount: { type: Number, min: 1 },
-  /** true : les dimensions sont celles d'UN colis (volume total = volume × nombre de colis) ; false : dimensions de l'ensemble de l'emballage. */
-  dimensionsPerParcel: { type: Boolean, default: true },
-  volumeM3: { type: Number, min: 0 }, totalVolumeM3: { type: Number, min: 0 },
+  volumeM3: { type: Number, min: 0 },
+  /** Date de vérification métier des dimensions d'un article autrefois saisi « par colis ». */
+  reviewedAt: { type: Date },
+  /** Champs OBSOLÈTES (retirés des écrans et de l'API) : valeurs historiques conservées, jamais réécrites. */
+  parcelCount: { type: Number, min: 1 }, dimensionsPerParcel: { type: Boolean }, totalVolumeM3: { type: Number, min: 0 },
 }, { _id: false });
 
 /** Informations douanières propres à l'article (valeurs saisies : aucun taux ni code n'est présumé). La TVA n'y figure pas : source unique `vatRateCode`. */
@@ -45,13 +49,18 @@ const productSchema = new Schema(
     companyId: { type: Schema.Types.ObjectId, ref: 'Company', required: true },
     reference: { type: String, required: true, trim: true },
     name: { type: String, required: true, trim: true },
+    /** Champs OBSOLÈTES (retirés des écrans et de l'API) : valeurs historiques conservées, jamais réécrites. */
     brand: { type: String, trim: true }, model: { type: String, trim: true },
     /** Statut métier. `isActive` (= statut actif) est conservé synchronisé pour les modules existants. */
     status: { type: String, enum: PRODUCT_STATUSES, default: 'active' },
     statusReason: { type: String, trim: true }, statusChangedAt: { type: Date },
     packaging: { type: packagingSchema },
     customs: { type: customsSchema },
-    /** Prix d'achat en devise étrangère (plus petite unité de CETTE devise) ; `purchasePriceMinor` reste la contre-valeur en devise de base (source des modules existants). */
+    /**
+     * Prix d'achat en devise étrangère (plus petite unité de CETTE devise). Devise à taux estimatif (EUR) : aucune contre-valeur
+     * réelle n'est enregistrée (`purchaseRate` absent, `purchasePriceMinor` = 0) — voir modules/products/purchase-price.ts.
+     * Autres devises : `purchasePriceMinor` est la contre-valeur au taux réel `purchaseRate`.
+     */
     purchaseCurrency: { type: String, trim: true, uppercase: true }, purchasePriceForeignMinor: { type: Number, min: 0 },
     purchaseRate: { type: Number, min: 0 }, purchaseRateDate: { type: Date },
     estimatedCostMinor: { type: Number, min: 0 }, minSalePriceMinor: { type: Number, min: 0 }, maxDiscountPct: { type: Number, min: 0, max: 100 },
@@ -76,7 +85,6 @@ const productSchema = new Schema(
 productSchema.index({ companyId: 1, reference: 1 }, { unique: true, collation: { locale: 'fr', strength: 2 } });
 productSchema.index({ companyId: 1, name: 1 });
 productSchema.index({ companyId: 1, status: 1, reference: 1 });
-productSchema.index({ companyId: 1, brand: 1 });
 productSchema.index({ companyId: 1, categoryId: 1 });
 productSchema.index({ companyId: 1, mainSupplierId: 1 });
 export type ProductDoc = InferSchemaType<typeof productSchema>;

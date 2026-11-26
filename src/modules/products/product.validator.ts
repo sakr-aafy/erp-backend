@@ -13,8 +13,9 @@ const hs = blank(z.string().trim().max(20).regex(/^[0-9A-Za-z .-]*$/, 'Code inva
 
 export const packagingBody = z.object({
   lengthMm: nn(1e7), widthMm: nn(1e7), heightMm: nn(1e7), netWeightKg: nn(1e7), grossWeightKg: nn(1e7),
-  type: z.enum(PACKAGING_TYPES).nullable().optional(), typeLabel: text(60), parcelCount: z.number().int('Entier requis').min(1, 'Au moins 1 colis').max(1e6).nullable().optional(),
-  dimensionsPerParcel: z.boolean().optional(),
+  type: z.enum(PACKAGING_TYPES).nullable().optional(), typeLabel: text(60),
+  /** Confirmation que les dimensions décrivent l'article complet (anciennes saisies « par colis »). */
+  confirmDimensions: z.boolean().optional(),
 }).strict();
 export const customsBody = z.object({
   supplierHsCode: hs, tnHsCode: hs, ddPct: nn(1000), fodecPct: nn(1000), rpdPct: nn(1000), originCountry: text(60), provenanceCountry: text(60), specialRegulation: text(500),
@@ -29,10 +30,10 @@ export const pricingBody = z.object({
 const productFields = {
   reference: z.string().trim().min(1).max(60),
   name: z.string().trim().min(2).max(200),
-  brand: text(80), model: text(80),
   description: z.string().trim().max(2000).optional(),
   kind: z.enum(['product', 'service']),
-  categoryId: nullableId,
+  /** Catégorie principale ; `subCategoryId` (facultatif) doit lui appartenir. */
+  categoryId: nullableId, subCategoryId: nullableId,
   unitId: objectId,
   purchasePriceMinor: minorInt,
   salePriceMinor: minorInt,
@@ -68,16 +69,24 @@ export const transactionsQuery = paginationQuery.extend({
   group: z.enum(['purchases', 'sales', 'stock', 'imports']).optional(), type: z.string().trim().max(30).optional(), status: z.string().trim().max(30).optional(), from: dateQ, to: dateQ, warehouseId: objectId.optional(),
 });
 export const transactionsExportQuery = z.object({ group: z.enum(['purchases', 'sales', 'stock', 'imports']).optional(), type: z.string().trim().max(30).optional(), status: z.string().trim().max(30).optional(), from: dateQ, to: dateQ, q: z.string().trim().max(100).optional(), warehouseId: objectId.optional(), format: exportFormat }).strict();
-export const pricingPreviewBody = z.object({ salePriceMinor: minorInt, costMinor: minorInt.nullable().optional(), vatRateCode: z.string().trim().min(1).max(20) }).strict();
+export const pricingPreviewBody = z.object({
+  salePriceMinor: minorInt.default(0), vatRateCode: z.string().trim().max(20).optional(),
+  /** Coût réel (CMP) de l'article s'il existe : prioritaire sur les valeurs estimées ci-dessous. */
+  costMinor: minorInt.nullable().optional(),
+  estimatedCostMinor: minorInt.nullable().optional(), purchasePriceMinor: minorInt.nullable().optional(),
+  purchaseCurrency: blank(z.string().trim().length(3).toUpperCase()).nullable().optional(), purchasePriceForeignMinor: minorInt.nullable().optional(),
+}).strict();
 export const stockTabQuery = z.object({ serialStatus: z.enum(['available', 'sold', 'returned', 'scrapped']).optional() });
 
 /** `open` = tous les articles non archivés (défaut). `active` (true/false/all) est conservé pour la compatibilité. */
 export const listFilters = {
-  categoryId: objectId.optional(), kind: z.enum(['product', 'service']).optional(), supplierId: objectId.optional(), brand: z.string().trim().max(80).optional(), warehouseId: objectId.optional(),
+  categoryId: objectId.optional(), subCategoryId: objectId.optional(), productId: objectId.optional(), kind: z.enum(['product', 'service']).optional(), supplierId: objectId.optional(), warehouseId: objectId.optional(),
   status: z.enum(['open', 'all', ...PRODUCT_STATUSES]).optional(), active: z.enum(['true', 'false', 'all']).optional(),
   stockState: z.enum(['out', 'below_min']).optional(), belowCost: boolQuery.optional(),
 };
 export const listQuery = paginationQuery.extend(listFilters);
+/** Suggestions de la recherche d'article (liste déroulante) : mêmes filtres que la liste, page courte. */
+export const suggestQuery = z.object({ q: z.string().trim().max(100).optional(), page: z.coerce.number().int().min(1).default(1), limit: z.coerce.number().int().min(1).max(30).default(15), ...listFilters });
 export const exportQuery = z.object({ q: z.string().trim().max(100).optional(), ...listFilters, format: exportFormat });
 export const idParam = z.object({ id: objectId });
 export const serialParam = z.object({ id: objectId, serialId: objectId });
@@ -86,6 +95,7 @@ export const serialsQuery = paginationQuery.extend({ status: z.enum(['available'
 export const importQuery = z.object({ mode: z.enum(['create', 'upsert']).default('create'), dryRun: boolQuery.default(true) });
 
 export const categoryBody = z.object({ name: z.string().trim().min(1).max(80), parentId: nullableId }).strict();
+export const categoryArchiveBody = z.object({}).strict();
 export const categoryUpdateBody = z.object({ name: z.string().trim().min(1).max(80) }).strict();
 export const unitBody = z.object({ code: z.string().trim().min(1).max(12), name: z.string().trim().min(1).max(60) }).strict();
 export const unitUpdateBody = unitBody.partial().strict();

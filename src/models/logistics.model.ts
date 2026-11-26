@@ -1,5 +1,6 @@
 import { Schema, model, type InferSchemaType } from 'mongoose';
 import { lineSchema, totalsSchema } from './sales.model.js';
+import { addressSnapshotSchema } from '../modules/parties/delivery-address.js';
 
 const oid = (ref: string, required = false) => ({ type: Schema.Types.ObjectId, ref, required });
 const company = oid('Company', true);
@@ -56,9 +57,12 @@ const purchaseLineSchema = new Schema({
   orderLineId: Schema.Types.ObjectId,
 }, { _id: true });
 const supplierSnapshot = new Schema({ name: String, taxId: String }, { _id: false });
+/** Adresse de réception de l'entreprise (magasin), copiée sur la commande et la réception. */
+const receivingSnapshot = new Schema({ warehouseId: oid('Warehouse'), code: String, name: String, address: String }, { _id: false });
+const purchaseAddresses = { supplierAddress: { type: addressSnapshotSchema }, receivingAddress: { type: receivingSnapshot } };
 
 const purchaseOrderSchema = new Schema({
-  companyId: company, number: { type: String, required: true }, supplierId: oid('Supplier', true), supplier: supplierSnapshot, orderDate: { type: Date, required: true }, expectedDate: Date,
+  ...purchaseAddresses, companyId: company, number: { type: String, required: true }, supplierId: oid('Supplier', true), supplier: supplierSnapshot, orderDate: { type: Date, required: true }, expectedDate: Date,
   status: { type: String, enum: ['draft', 'confirmed', 'partially_received', 'received', 'cancelled'], default: 'draft' },
   lines: [purchaseLineSchema], totals: { type: totalsSchema, required: true }, notes: String, createdBy: oid('User'), confirmedAt: Date, cancelledAt: Date, cancelReason: String,
 }, { timestamps: true });
@@ -72,7 +76,7 @@ export const PurchaseOrder = model('PurchaseOrder', purchaseOrderSchema);
 const receiptLineSchema = new Schema({ orderLineId: Schema.Types.ObjectId, importLineId: Schema.Types.ObjectId, productId: oid('Product', true), designation: String, quantity: { type: Number, required: true },
   unitCostMinor: { type: Number, default: 0 }, extraUnitCostMinor: { type: Number, default: 0 }, valueMinor: { type: Number, default: 0 }, serials: [String] }, { _id: true });
 const goodsReceiptSchema = new Schema({
-  companyId: company, number: { type: String, required: true }, purchaseOrderId: oid('PurchaseOrder'), importFileId: oid('ImportFile'), supplierId: oid('Supplier', true), supplier: supplierSnapshot,
+  ...purchaseAddresses, companyId: company, number: { type: String, required: true }, purchaseOrderId: oid('PurchaseOrder'), importFileId: oid('ImportFile'), supplierId: oid('Supplier', true), supplier: supplierSnapshot,
   warehouseId: oid('Warehouse', true), receiptDate: { type: Date, required: true }, status: { type: String, enum: ['draft', 'validated'], default: 'draft' }, lines: [receiptLineSchema], notes: String,
   deliveryNoteRef: String, createdBy: oid('User'), validatedAt: Date, validatedBy: oid('User'),
 }, { timestamps: true });

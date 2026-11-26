@@ -4,6 +4,7 @@ import { minorInt, partyFields } from '../parties/party.shared.js';
 
 export const supplierBody = z.object({
   ...partyFields,
+  tradeName: z.string().trim().max(150).nullable().optional().or(z.literal('').transform(() => undefined)),
   leadTimeDays: z.number().int().min(0).max(1000).nullable().optional(),
   blockThresholdMinor: minorInt.nullable().optional(),
   isForeign: z.boolean().optional(),

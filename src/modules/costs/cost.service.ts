@@ -5,6 +5,7 @@ import { CostHistory, StockLevel } from '../../models/logistics.model.js';
 import { AppError } from '../../utils/errors.js';
 import { objectId, paginationQuery } from '../../utils/pagination.js';
 import { minorInt } from '../parties/party.shared.js';
+import { needsRealRate, realPurchaseOrNull } from '../products/purchase-price.js';
 import { withTransaction } from '../../utils/transaction.js';
 
 type Id = Types.ObjectId;
@@ -22,9 +23,11 @@ export async function sheet(companyId: Id, productId: string) {
   if (!p) throw AppError.notFound('Article introuvable');
   const levels = await StockLevel.find({ companyId, productId }).populate('warehouseId', 'code name').lean();
   const history = await CostHistory.find({ companyId, productId }).sort({ at: -1 }).limit(10).lean();
-  const cost = p.costPriceMinor ?? p.purchasePriceMinor ?? 0; const qty = levels.reduce((s, l) => s + l.qty, 0); const value = levels.reduce((s, l) => s + l.valueMinor, 0);
-  return { productId, reference: p.reference, name: p.name, category: (p.categoryId as unknown as { name?: string } | null)?.name ?? null, purchasePriceMinor: p.purchasePriceMinor ?? 0, costPriceMinor: p.costPriceMinor ?? null, effectiveCostMinor: cost, salePriceMinor: p.salePriceMinor ?? 0,
-    ...marginOf(cost, p.salePriceMinor ?? 0), belowCost: (p.salePriceMinor ?? 0) < cost, stock: { qty, valueMinor: value, cmpMinor: qty > 0 ? Math.round(value / qty) : null, byWarehouse: levels.map((l) => ({ warehouse: (l.warehouseId as unknown as { code: string }).code, qty: l.qty, valueMinor: l.valueMinor })) },
+  // Rapport financier : coût réel (CMP), sinon prix d'achat converti au taux RÉEL ; inconnu (null) sans taux réel — jamais le taux estimatif
+  const purchaseReal = await realPurchaseOrNull(companyId, p);
+  const cost = p.costPriceMinor ?? purchaseReal; const qty = levels.reduce((s, l) => s + l.qty, 0); const value = levels.reduce((s, l) => s + l.valueMinor, 0);
+  return { productId, reference: p.reference, name: p.name, category: (p.categoryId as unknown as { name?: string } | null)?.name ?? null, purchasePriceMinor: purchaseReal, costPriceMinor: p.costPriceMinor ?? null, effectiveCostMinor: cost, salePriceMinor: p.salePriceMinor ?? 0,
+    ...(cost === null ? { marginMinor: null, marginRatePct: null, markPct: null } : marginOf(cost, p.salePriceMinor ?? 0)), belowCost: cost !== null && (p.salePriceMinor ?? 0) < cost, stock: { qty, valueMinor: value, cmpMinor: qty > 0 ? Math.round(value / qty) : null, byWarehouse: levels.map((l) => ({ warehouse: (l.warehouseId as unknown as { code: string }).code, qty: l.qty, valueMinor: l.valueMinor })) },
     lastEntry: history[0] ? { purchaseUnitCostMinor: history[0].purchaseUnitCostMinor ?? 0, extraUnitCostMinor: history[0].extraUnitCostMinor ?? 0, reason: history[0].reason, at: history[0].at } : null,
     history: history.map(historyDto) };
 }
@@ -38,7 +41,7 @@ export async function history(companyId: Id, productId: string, f: { page: numbe
 /** Simulation de marge (aucune écriture) : coût = achat + frais ; marge, taux, et prix de vente minimal pour une marge cible. */
 export async function simulate(companyId: Id, b: z.infer<typeof simulateBody>) {
   const p = b.productId ? await Product.findOne({ _id: b.productId, companyId }).lean() : null; if (b.productId && !p) throw AppError.notFound('Article introuvable');
-  const purchase = b.purchasePriceMinor ?? p?.costPriceMinor ?? p?.purchasePriceMinor; const sale = b.salePriceMinor ?? p?.salePriceMinor;
+  const purchase = b.purchasePriceMinor ?? p?.costPriceMinor ?? (p ? await realPurchaseOrNull(companyId, p) : null) ?? undefined; const sale = b.salePriceMinor ?? p?.salePriceMinor;
   if (purchase === undefined) throw AppError.badRequest('Prix d’achat requis (ou article)');
   const cost = purchase + b.extraCostsMinor;
   return { costMinor: cost, saleMinor: sale ?? null, ...(sale !== undefined && { ...marginOf(cost, sale), belowCost: sale < cost }), ...(b.targetMarginPct !== undefined && { minSalePriceForTargetMinor: Math.ceil(cost * (1 + b.targetMarginPct / 100)) }) };
@@ -64,11 +67,17 @@ export async function report(companyId: Id, f: { categoryId?: string | undefined
   const filter: Record<string, unknown> = { companyId, kind: 'product', isActive: true };
   if (f.categoryId) { const kids = cats.filter((c) => String(c.parentId) === f.categoryId).map((c) => c._id); filter.categoryId = { $in: [f.categoryId, ...kids] }; }
   const all = await Product.find(filter).sort({ reference: 1 }).lean();
-  let items = all.map((p) => { const cost = p.costPriceMinor ?? p.purchasePriceMinor ?? 0; const cat = p.categoryId ? byId.get(p.categoryId.toString()) : undefined; const parent = cat?.parentId ? byId.get(cat.parentId.toString()) : undefined;
-    return { productId: p._id.toString(), reference: p.reference, name: p.name, category: parent?.name ?? cat?.name ?? null, subCategory: parent ? cat?.name ?? null : null, purchasePriceMinor: p.purchasePriceMinor ?? 0, costPriceMinor: cost, salePriceMinor: p.salePriceMinor ?? 0, ...marginOf(cost, p.salePriceMinor ?? 0), belowCost: (p.salePriceMinor ?? 0) < cost }; });
+  // Taux réels résolus une seule fois par devise ; le taux estimatif n'intervient jamais dans ce rapport
+  const real = new Map<string, number | null>();
+  for (const p of all) if (p.costPriceMinor === undefined || p.costPriceMinor === null) real.set(p._id.toString(), await realPurchaseOrNull(companyId, p));
+  let items = all.map((p) => { const cost = p.costPriceMinor ?? real.get(p._id.toString()) ?? null; const sale = p.salePriceMinor ?? 0; const cat = p.categoryId ? byId.get(p.categoryId.toString()) : undefined; const parent = cat?.parentId ? byId.get(cat.parentId.toString()) : undefined;
+    return { productId: p._id.toString(), reference: p.reference, name: p.name, category: parent?.name ?? cat?.name ?? null, subCategory: parent ? cat?.name ?? null : null,
+      purchasePriceMinor: needsRealRate(p) ? real.get(p._id.toString()) ?? null : p.purchasePriceMinor ?? 0, costPriceMinor: cost, salePriceMinor: sale,
+      ...(cost === null ? { marginMinor: null, marginRatePct: null, markPct: null } : marginOf(cost, sale)), belowCost: cost !== null && sale < cost }; });
   if (f.belowCost === 'true') items = items.filter((i) => i.belowCost);
   const groups = new Map<string, { category: string; count: number; cost: number; sale: number }>();
-  for (const i of items) { const k = i.category ?? 'Sans catégorie'; const g = groups.get(k) ?? { category: k, count: 0, cost: 0, sale: 0 }; g.count++; g.cost += i.costPriceMinor; g.sale += i.salePriceMinor; groups.set(k, g); }
+  // Les articles au coût réel inconnu sont comptés mais exclus des marges (ils fausseraient les totaux)
+  for (const i of items) { const k = i.category ?? 'Sans catégorie'; const g = groups.get(k) ?? { category: k, count: 0, cost: 0, sale: 0 }; g.count++; if (i.costPriceMinor !== null) { g.cost += i.costPriceMinor; g.sale += i.salePriceMinor; } groups.set(k, g); }
   return { items: items.slice((f.page - 1) * f.limit, f.page * f.limit), total: items.length, page: f.page, limit: f.limit,
     byCategory: [...groups.values()].map((g) => ({ category: g.category, count: g.count, marginMinor: g.sale - g.cost, marginRatePct: pct(g.sale - g.cost, g.cost), markPct: pct(g.sale - g.cost, g.sale) })) };
 }

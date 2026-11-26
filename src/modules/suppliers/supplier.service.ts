@@ -4,7 +4,10 @@ import { Supplier, type SupplierDoc } from '../../models/supplier.model.js';
 import { AppError } from '../../utils/errors.js';
 import { buildSort, escapeRegex } from '../../utils/pagination.js';
 import { assertNotReferenced } from '../../services/reference-guard.js';
+import { ensureCounter, nextDocumentNumber } from '../../services/numbering.service.js';
+import { withTransaction } from '../../utils/transaction.js';
 import { dropNulls, normalizeContacts, normalizeTaxId } from '../parties/party.shared.js';
+import { addressDto, addressesOf } from '../parties/delivery-address.js';
 import type { Column } from '../../services/export.service.js';
 
 type Id = Types.ObjectId;
@@ -17,7 +20,7 @@ const effectiveThreshold = (s: { blockThresholdMinor?: number | null }, companyT
 export const toDto = (s: Lean, companyThreshold?: number | null) => {
   const th = effectiveThreshold(s, companyThreshold);
   return {
-    id: s._id.toString(), name: s.name, taxId: s.taxId ?? null, address: s.address ?? {}, phone: s.phone ?? null, email: s.email ?? null,
+    id: s._id.toString(), code: s.code ?? null, name: s.name, tradeName: s.tradeName ?? null, taxId: s.taxId ?? null, address: s.address ?? {}, deliveryAddresses: addressesOf(s).map(addressDto), phone: s.phone ?? null, email: s.email ?? null,
     contacts: (s.contacts ?? []).map((k) => ({ _id: (k as { _id?: Id })._id?.toString(), name: k.name, role: k.role ?? null, email: k.email ?? null, phone: k.phone ?? null, isPrimary: !!k.isPrimary })),
     leadTimeDays: s.leadTimeDays ?? null, paymentTerms: s.paymentTerms ?? null, paymentDelayDays: s.paymentDelayDays ?? 0,
     balanceMinor: s.balanceMinor ?? 0, blockThresholdMinor: s.blockThresholdMinor ?? null, effectiveThresholdMinor: th ?? null,
@@ -36,14 +39,14 @@ export function buildFilter(companyId: Id, f: SupplierFilters): FilterQuery<Supp
   if (f.foreign !== undefined) filter.isForeign = f.foreign;
   if (f.q) {
     const rx = new RegExp(escapeRegex(f.q), 'i');
-    filter.$or = [{ name: rx }, { taxId: rx }, { email: rx }, { phone: rx }, { 'contacts.name': rx }, { 'address.city': rx }];
+    filter.$or = [{ code: rx }, { name: rx }, { tradeName: rx }, { taxId: rx }, { email: rx }, { phone: rx }, { 'contacts.name': rx }, { 'address.city': rx }];
   }
   return filter;
 }
 
 export async function list(companyId: Id, f: SupplierFilters & { page: number; limit: number; sort?: string | undefined }) {
   const filter = buildFilter(companyId, f);
-  const sort = buildSort(f.sort, ['name', 'taxId', 'balanceMinor', 'leadTimeDays', 'createdAt'], { name: 1, _id: 1 });
+  const sort = buildSort(f.sort, ['code', 'name', 'taxId', 'balanceMinor', 'leadTimeDays', 'createdAt'], { name: 1, _id: 1 });
   const [items, total, agg, th] = await Promise.all([
     Supplier.find(filter).sort(sort).skip((f.page - 1) * f.limit).limit(f.limit).lean(),
     Supplier.countDocuments(filter),
@@ -60,7 +63,7 @@ export async function getOwn(companyId: Id, id: string) {
 }
 export const get = async (companyId: Id, id: string) => toDto(await getOwn(companyId, id), await companyThresholdOf(companyId));
 
-type Input = Partial<{ name: string; taxId: string | null; address: object; phone: string | null; email: string | null; contacts: { isPrimary?: boolean }[]; paymentTerms: string | null; paymentDelayDays: number; notes: string | null;
+type Input = Partial<{ name: string; tradeName: string | null; taxId: string | null; address: object; phone: string | null; email: string | null; contacts: { isPrimary?: boolean }[]; paymentTerms: string | null; paymentDelayDays: number; notes: string | null;
   leadTimeDays: number | null; blockThresholdMinor: number | null; isForeign: boolean; currency: string | null }>;
 
 /** Règle métier côté serveur (le formulaire ne fait que l'anticiper) : un fournisseur étranger est facturé dans une devise. */
@@ -79,7 +82,13 @@ async function prepare(companyId: Id, d: Input, existing?: { isForeign?: boolean
 }
 
 export async function create(companyId: Id, d: Input) {
-  const s = await Supplier.create({ ...dropNulls(await prepare(companyId, d)), companyId });
+  const data = await prepare(companyId, d);
+  await ensureCounter(companyId, 'supplier');
+  const s = await withTransaction(async (session) => {
+    const code = await nextDocumentNumber(companyId, 'supplier', session);
+    const [c] = await Supplier.create([{ ...dropNulls(data), companyId, code }], { session });
+    return c!;
+  });
   return toDto(s.toObject() as Lean, await companyThresholdOf(companyId));
 }
 export async function update(companyId: Id, id: string, d: Input) {
@@ -135,4 +144,6 @@ export const exportColumns = (decimals: number): Column<Dto>[] => [
   { header: 'Conditions de paiement', key: 'terms', width: 20, value: (s) => s.paymentTerms },
   { header: 'Solde dû', key: 'balance', width: 14, align: 'right', value: (s) => (s.balanceMinor / 10 ** decimals).toFixed(decimals) },
   { header: 'Statut', key: 'status', width: 10, value: (s) => (s.isArchived ? 'Archivé' : 'Actif') },
+  { header: 'Code', key: 'code', width: 11, value: (s) => s.code },
+  { header: 'Nom commercial', key: 'tradeName', width: 22, value: (s) => s.tradeName },
 ];

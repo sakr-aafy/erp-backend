@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { CUSTOMER_DOC_TYPES, ACTIVITY_KINDS, CUSTOMER_PAYMENT_METHODS, CUSTOMER_STATUSES, CUSTOMER_TYPES } from '../../models/customer.model.js';
 import { boolQuery, exportFormat, objectId, paginationQuery } from '../../utils/pagination.js';
-import { addressZ, contactZ, minorInt, partyFields } from '../parties/party.shared.js';
+import { contactZ, minorInt, partyFields } from '../parties/party.shared.js';
 
 const blank = <T extends z.ZodType>(s: T) => z.union([s, z.literal('').transform(() => undefined)]);
 /** URL http(s) uniquement (aucun javascript:, data:…), 300 caractères max. */
@@ -15,10 +15,9 @@ export const customerBody = z.object({
   ...partyFields,
   type: z.enum(CUSTOMER_TYPES).optional(),
   tradeName: text(150),
-  registryNumber: text(60),
-  sector: text(100),
-  shippingAddress: addressZ.optional(),
-  shippingSameAsBilling: z.boolean().optional(),
+  /** Conditions libres (ex. « 30 % à la commande et le solde avant la livraison ») : plus longues que les préréglages. */
+  paymentTerms: text(500),
+  paymentTermsCustom: z.boolean().optional(),
   phone: phoneField,
   secondaryPhone: phoneField,
   website: urlField,
@@ -30,8 +29,11 @@ export const customerBody = z.object({
   subjectToWithholding: z.boolean().optional(),
   stampExempt: z.boolean().optional(),
 }).strict();
-export const createCustomerBody = customerBody;
-export const updateCustomerBody = customerBody.partial().strict();
+const customTermsNeedText = (v: { paymentTermsCustom?: boolean | undefined; paymentTerms?: string | null | undefined }, ctx: z.RefinementCtx) => {
+  if (v.paymentTermsCustom && !v.paymentTerms) ctx.addIssue({ code: 'custom', path: ['paymentTerms'], message: 'Saisissez le texte des conditions personnalisées' });
+};
+export const createCustomerBody = customerBody.superRefine(customTermsNeedText);
+export const updateCustomerBody = customerBody.partial().strict().superRefine(customTermsNeedText);
 
 export const statusBody = z.object({ status: z.enum(CUSTOMER_STATUSES), reason: z.string().trim().max(300).optional() }).strict();
 export const contactBody = contactZ.omit({ _id: true });

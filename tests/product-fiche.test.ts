@@ -7,7 +7,7 @@ import { ExchangeRate } from '../src/models/logistics.model.js';
 import { Product, ProductActivity, ProductDocument, ProductStockSetting } from '../src/models/product.model.js';
 import { AuditLog } from '../src/models/audit-log.model.js';
 import { migrateProducts } from '../src/modules/products/product.migration.js';
-import { margins, packagingProblems, ttcOf, volumes } from '../src/modules/products/product.pricing.js';
+import { margins, packagingProblems, ttcOf, volumeM3 } from '../src/modules/products/product.pricing.js';
 
 let A: LCtx, B: LCtx;
 const api = () => request(app);
@@ -23,17 +23,17 @@ beforeAll(async () => { await setupDb(); A = await logisticsCompany('Alpha', 'ad
 afterAll(async () => { await teardownDb(); });
 
 describe('formules de calcul (fonctions pures)', () => {
-  it('volume = L × l × h / 1 000 000 000 ; total = volume × colis seulement si les dimensions sont celles d’un colis', () => {
-    expect(volumes({ lengthMm: 1200, widthMm: 800, heightMm: 900 })).toMatchObject({ volumeM3: 0.864, totalVolumeM3: 0.864, multiplied: false });
-    expect(volumes({ lengthMm: 1200, widthMm: 800, heightMm: 900, parcelCount: 3 })).toMatchObject({ volumeM3: 0.864, totalVolumeM3: 2.592, multiplied: true });
-    expect(volumes({ lengthMm: 1200, widthMm: 800, heightMm: 900, parcelCount: 3, dimensionsPerParcel: false })).toMatchObject({ volumeM3: 0.864, totalVolumeM3: 0.864, multiplied: false });
-    expect(volumes({ lengthMm: 10, widthMm: 10, heightMm: 10 }).volumeM3).toBe(0.000001); expect(volumes({ lengthMm: 1, widthMm: 1, heightMm: 1 }).volumeM3).toBe(0.000000001);
-    expect(volumes({ lengthMm: 100, widthMm: 200 })).toMatchObject({ volumeM3: null, totalVolumeM3: null }); expect(volumes(null).volumeM3).toBeNull();
-    expect(volumes({ lengthMm: 1250.5, widthMm: 800, heightMm: 900.25 }).volumeM3).toBe(0.9006101); // décimales autorisées
+  it('volume = L × l × h / 1 000 000 000, sans nombre de colis ; précision conservée', () => {
+    expect(volumeM3({ lengthMm: 1200, widthMm: 800, heightMm: 900 })).toBe(0.864);
+    expect(volumeM3({ lengthMm: 910, widthMm: 382, heightMm: 710, parcelCount: 3 })).toBe(0.2468102); // exemple du document : jamais multiplié
+    expect(volumeM3({ lengthMm: 1, widthMm: 1, heightMm: 1 })).toBe(0.000000001);
+    expect(volumeM3({ lengthMm: 100, widthMm: 200 })).toBeNull(); expect(volumeM3(null)).toBeNull();
+    expect(volumeM3({ lengthMm: 1250.5, widthMm: 800, heightMm: 900.25 })).toBe(0.9006101); // dimensions décimales
+    expect(volumeM3({ lengthMm: 0.1, widthMm: 0.1, heightMm: 0.1 })).toBe(0.000000000001); // pas d’arrondi prématuré
   });
-  it('règles de packaging : valeurs négatives, brut < net, colis entier ≥ 1', () => {
+  it('règles des dimensions et poids : valeurs négatives, brut < net', () => {
     expect(packagingProblems({ lengthMm: -1 })).toHaveLength(1); expect(packagingProblems({ netWeightKg: 10, grossWeightKg: 9 })[0]).toMatch(/poids brut/i);
-    expect(packagingProblems({ netWeightKg: 10, grossWeightKg: 10 })).toEqual([]); expect(packagingProblems({ netWeightKg: 10 })).toEqual([]); expect(packagingProblems({ parcelCount: 0 })).toHaveLength(1); expect(packagingProblems({ parcelCount: 1.5 })).toHaveLength(1);
+    expect(packagingProblems({ netWeightKg: 10, grossWeightKg: 10 })).toEqual([]); expect(packagingProblems({ netWeightKg: 10 })).toEqual([]);
   });
   it('marges HT et TTC indicatives ; divisions par zéro gérées', () => {
     const m = margins(100_000, 60_000, 119_000, 19);
@@ -50,27 +50,29 @@ describe('formules de calcul (fonctions pures)', () => {
 describe('fiche article — création et groupes', () => {
   it('crée un article avec les 5 groupes : valeurs calculées par le serveur (volumes, TTC, marges)', async () => {
     ref = 'MACH-0001';
-    const r = await A.j.post('/products', prod({ reference: ref, name: 'Machine industrielle', brand: 'Optimum', model: 'TH-4010', description: 'Tour conventionnel', minSalePriceMinor: 90_000, maxDiscountPct: 5, minStock: 2,
-      estimatedCostMinor: 65_000, mainSupplierId: A.supplierId, packaging: { lengthMm: 1200, widthMm: 800, heightMm: 900, netWeightKg: 850.5, grossWeightKg: 920, type: 'wooden_crate', parcelCount: 2 },
+    const r = await A.j.post('/products', prod({ reference: ref, name: 'Machine industrielle', description: 'Tour conventionnel', minSalePriceMinor: 90_000, maxDiscountPct: 5, minStock: 2,
+      estimatedCostMinor: 65_000, mainSupplierId: A.supplierId, packaging: { lengthMm: 1200, widthMm: 800, heightMm: 900, netWeightKg: 850.5, grossWeightKg: 920, type: 'wooden_crate' },
       customs: { supplierHsCode: '0845.20.10', tnHsCode: '0084520', ddPct: 10, fodecPct: 1, rpdPct: 0, originCountry: 'Allemagne', provenanceCountry: 'France', specialRegulation: 'Licence requise' } }));
     expect(r.status, JSON.stringify(r.body)).toBe(201); id = r.body.id;
-    expect(r.body).toMatchObject({ reference: ref, status: 'active', statusLabel: 'Actif', brand: 'Optimum', model: 'TH-4010', vatRateCode: 'T19', vatRatePct: 19, vatRegime: 'taxable', salePriceMinor: 100_000, saleTtcMinor: 119_000, minSalePriceMinor: 90_000, maxDiscountPct: 5,
+    expect(r.body).toMatchObject({ reference: ref, status: 'active', statusLabel: 'Actif', vatRateCode: 'T19', vatRatePct: 19, vatRegime: 'taxable', salePriceMinor: 100_000, saleTtcMinor: 119_000, minSalePriceMinor: 90_000, maxDiscountPct: 5,
       purchasePriceMinor: 60_000, estimatedCostMinor: 65_000, costPriceMinor: null, effectiveCostMinor: 65_000, mainSupplierName: 'Fournisseur Local' });
-    expect(r.body.packaging).toMatchObject({ lengthMm: 1200, volumeM3: 0.864, totalVolumeM3: 1.728, multiplied: true, type: 'wooden_crate', parcelCount: 2, dimensionsPerParcel: true });
+    expect(r.body.packaging).toMatchObject({ lengthMm: 1200, volumeM3: 0.864, type: 'wooden_crate', review: null });
+    for (const k of ['brand', 'model']) expect(r.body).not.toHaveProperty(k);
+    for (const k of ['parcelCount', 'dimensionsPerParcel', 'totalVolumeM3']) expect(r.body.packaging).not.toHaveProperty(k);
     expect(r.body.customs).toMatchObject({ supplierHsCode: '0845.20.10', tnHsCode: '0084520', ddPct: 10, fodecPct: 1, rpdPct: 0, originCountry: 'Allemagne', provenanceCountry: 'France', specialRegulation: 'Licence requise' });
     expect(r.body.marginMinor).toBe(35_000); expect(r.body.marginRatePct).toBe(53.85); expect(r.body.markPct).toBe(35); expect(r.body.marginTtcMinor).toBe(119_000 - (65_000 + 12_350)); // coût estimé 65 000 ; TVA sur coût 12 350
     expect(r.body.warnings).toEqual([]);
   });
   it('le volume envoyé par le client est ignoré : le serveur recalcule (et à chaque modification)', async () => {
     expect((await A.j.post('/products', prod({ packaging: { lengthMm: 100, widthMm: 100, heightMm: 100, volumeM3: 999 } }))).status).toBe(422); // champ inconnu refusé
-    const u = await A.j.put(`/products/${id}/packaging`, { lengthMm: 1000, widthMm: 1000, heightMm: 1000, parcelCount: 3 });
-    expect(u.body.packaging).toMatchObject({ volumeM3: 1, totalVolumeM3: 3, heightMm: 1000, netWeightKg: 850.5, type: 'wooden_crate' }); // les autres champs du groupe sont conservés
-    const u2 = await A.j.put(`/products/${id}/packaging`, { dimensionsPerParcel: false }); expect(u2.body.packaging).toMatchObject({ volumeM3: 1, totalVolumeM3: 1, multiplied: false });
-    await A.j.put(`/products/${id}/packaging`, { lengthMm: 1200, widthMm: 800, heightMm: 900, parcelCount: 2, dimensionsPerParcel: true });
-    expect((await Product.findById(id).lean())!.packaging).toMatchObject({ volumeM3: 0.864, totalVolumeM3: 1.728 });
+    const u = await A.j.put(`/products/${id}/packaging`, { lengthMm: 1000, widthMm: 1000, heightMm: 1000 });
+    expect(u.body.packaging).toMatchObject({ volumeM3: 1, heightMm: 1000, netWeightKg: 850.5, type: 'wooden_crate' }); // les autres champs du groupe sont conservés
+    expect((await A.j.put(`/products/${id}/packaging`, { heightMm: null })).body.packaging.volumeM3).toBeNull(); // dimensions incomplètes : non calculé
+    await A.j.put(`/products/${id}/packaging`, { lengthMm: 1200, widthMm: 800, heightMm: 900 });
+    expect((await Product.findById(id).lean())!.packaging).toMatchObject({ volumeM3: 0.864 });
   });
-  it('règles de packaging côté serveur : négatifs, brut < net, nombre de colis', async () => {
-    for (const bad of [{ lengthMm: -5 }, { widthMm: -1 }, { netWeightKg: -1 }, { grossWeightKg: -2 }, { parcelCount: 0 }, { parcelCount: 2.5 }, { type: 'bois' }]) expect((await A.j.put(`/products/${id}/packaging`, bad)).status, JSON.stringify(bad)).toBe(422);
+  it('règles côté serveur : négatifs, brut < net, anciens champs de colis refusés', async () => {
+    for (const bad of [{ lengthMm: -5 }, { widthMm: -1 }, { netWeightKg: -1 }, { grossWeightKg: -2 }, { parcelCount: 2 }, { dimensionsPerParcel: true }, { type: 'bois' }]) expect((await A.j.put(`/products/${id}/packaging`, bad)).status, JSON.stringify(bad)).toBe(422);
     const g = await A.j.put(`/products/${id}/packaging`, { netWeightKg: 900, grossWeightKg: 800 }); expect(g.status).toBe(400); expect(g.body.error.message).toMatch(/poids brut/i);
     expect((await A.j.put(`/products/${id}/packaging`, { netWeightKg: 800.25, grossWeightKg: 800.25 })).status).toBe(200); // égalité autorisée, décimales acceptées
     await A.j.put(`/products/${id}/packaging`, { netWeightKg: 850.5, grossWeightKg: 920 });
@@ -104,14 +106,11 @@ describe('fiche article — création et groupes', () => {
 });
 
 describe('fiche article — prix, devises, règles commerciales', () => {
-  it('prix d’achat en EUR : contre-valeur en TND au taux enregistré ; taux manquant refusé ; retour en TND', async () => {
-    const e = await A.j.put(`/products/${id}/prices`, { purchaseCurrency: 'EUR', purchasePriceForeignMinor: 10_000 }); // 100,00 € × 3,4 = 340,000 TND
-    expect(e.status, JSON.stringify(e.body)).toBe(200); expect(e.body).toMatchObject({ purchaseCurrency: 'EUR', purchasePriceForeignMinor: 10_000, purchaseRate: 3.4, purchasePriceMinor: 340_000 });
-    expect(new Date(e.body.purchaseRateDate).toISOString().slice(0, 10)).toBe('2026-01-01');
-    expect((await A.j.put(`/products/${id}/prices`, { purchaseCurrency: 'EUR' })).body.purchasePriceMinor).toBe(340_000); // même montant, recalcul
-    const noRate = await B.j.post('/products', { reference: 'EUR-B', name: 'Article EUR', unitId: B.unitId, vatRateCode: 'T19', salePriceMinor: 1000, purchaseCurrency: 'EUR', purchasePriceForeignMinor: 500 }); expect(noRate.status, JSON.stringify(noRate.body)).toBe(400); expect(noRate.body.error.message).toMatch(/taux de change/i);
+  it('prix d’achat en EUR : taux estimatif 3,5 (le taux réel enregistré n’est pas utilisé) ; autres devises : taux réel ; retour en TND', async () => {
+    const e = await A.j.put(`/products/${id}/prices`, { purchaseCurrency: 'EUR', purchasePriceForeignMinor: 10_000 }); // 100,00 € × 3,5 = 350,000 TND
+    expect(e.status, JSON.stringify(e.body)).toBe(200); expect(e.body).toMatchObject({ purchaseCurrency: 'EUR', purchasePriceForeignMinor: 10_000, estimateRate: 3.5, estimatedPurchaseMinor: 350_000, purchaseRate: null, purchasePriceMinor: null });
     expect((await A.j.put(`/products/${id}/prices`, { purchaseCurrency: 'XYZ', purchasePriceForeignMinor: 1 })).status).toBe(400);
-    const back = await A.j.put(`/products/${id}/prices`, { purchaseCurrency: null, purchasePriceForeignMinor: null, purchasePriceMinor: 60_000 }); expect(back.body).toMatchObject({ purchaseCurrency: null, purchasePriceForeignMinor: null, purchasePriceMinor: 60_000 });
+    const back = await A.j.put(`/products/${id}/prices`, { purchaseCurrency: null, purchasePriceForeignMinor: null, purchasePriceMinor: 60_000 }); expect(back.body).toMatchObject({ purchaseCurrency: null, purchasePriceForeignMinor: null, purchasePriceMinor: 60_000, estimateRate: null });
   });
   it('coût de revient réel prioritaire sur le coût estimé ; marge ; alerte vente sous le coût et sous le minimum', async () => {
     await Product.updateOne({ _id: id }, { costPriceMinor: 80_000 }); // alimenté par les réceptions / importations (module Coût de revient)
@@ -335,14 +334,14 @@ describe('fiche article — activités', () => {
   let a = ''; let manual = '';
   it('événements automatiques générés par les opérations réelles ; non modifiables ; sans doublon', async () => {
     a = (await A.j.post('/products', prod({ reference: 'ACT-1', name: 'Article activités', salePriceMinor: 100_000, purchasePriceMinor: 50_000 }))).body.id;
-    await A.j.put(`/products/${a}/prices`, { purchasePriceMinor: 55_000 }); await A.j.put(`/products/${a}/prices`, { salePriceMinor: 120_000 }); await A.j.put(`/products/${a}`, { brand: 'Optimum', model: 'M-2' });
+    await A.j.put(`/products/${a}/prices`, { purchasePriceMinor: 55_000 }); await A.j.put(`/products/${a}/prices`, { salePriceMinor: 120_000 }); await A.j.put(`/products/${a}`, { description: 'Nouvelle description' });
     await A.j.put(`/products/${a}/prices`, { salePriceMinor: 120_000 }); // aucun changement : aucun événement
     await upload(A.token, a, PDF, 'ce.pdf', 'ce_certificate'); await stockIn(A, a, 3, 1000, A.w1);
     const t = (await A.j.get(`/products/${a}/activities?limit=100`)).body; const kinds = t.items.map((x: { kind: string }) => x.kind);
     for (const k of ['product_created', 'purchase_price_changed', 'sale_price_changed', 'technical_changed', 'document_added', 'stock_changed']) expect(kinds, k).toContain(k);
     expect(kinds.filter((k: string) => k === 'sale_price_changed'), JSON.stringify(t.items.map((x: { kind: string; meta: unknown }) => [x.kind, x.meta]))).toHaveLength(1); expect(kinds.filter((k: string) => k === 'purchase_price_changed')).toHaveLength(1); // jamais de doublon, jamais d'événement sans changement
     const sale = t.items.find((x: { kind: string }) => x.kind === 'sale_price_changed'); expect(sale.meta).toMatchObject({ saleFrom: 100_000, saleTo: 120_000 }); expect(sale).toMatchObject({ auto: true, editable: false, kindLabel: 'Prix de vente modifié' });
-    expect(t.items.find((x: { kind: string }) => x.kind === 'technical_changed').description).toMatch(/marque/); const again = (await A.j.get(`/products/${a}/activities?limit=100`)).body; expect(again.items.map((x: { id: string }) => x.id)).toEqual(t.items.map((x: { id: string }) => x.id));
+    expect(t.items.find((x: { kind: string }) => x.kind === 'technical_changed').description).toMatch(/description/); const again = (await A.j.get(`/products/${a}/activities?limit=100`)).body; expect(again.items.map((x: { id: string }) => x.id)).toEqual(t.items.map((x: { id: string }) => x.id));
     const auto = t.items.find((x: { kind: string }) => x.kind === 'product_created'); expect((await A.j.put(`/products/${a}/activities/${auto.id}`, { title: 'zz' })).status).toBe(409); expect((await A.j.del(`/products/${a}/activities/${auto.id}`)).status).toBe(409);
     expect(await AuditLog.countDocuments({ companyId: A.companyId, resource: 'product-activity' })).toBe(0); // journal métier distinct de l'audit de sécurité
   });
@@ -405,7 +404,8 @@ describe('fiche article — permissions par donnée sensible', () => {
     const pdf = await api().get(`/api/v1/products/${id2}/pdf`).set(authed(A.token)).buffer().parse(binaryParser); expect(pdf.status).toBe(200); expect(pdf.headers['content-type']).toMatch(/pdf/); expect((pdf.body as Buffer).subarray(0, 4).toString()).toBe('%PDF'); expect(pdf.headers['content-disposition']).toContain('fiche-article-MACH-0001');
     const x = await api().get('/api/v1/products/export?format=xlsx').set(authed((await login('lect@a.test')).token)).buffer().parse(binaryParser); const rows = await parseXlsx(x.body as Buffer);
     expect(rows[0]).not.toContain('Prix d\'achat HT'); expect(rows[0]).not.toContain('Coût de revient'); expect(rows[0]).toContain('Prix de vente HT');
-    const full = await parseXlsx(((await api().get('/api/v1/products/export?format=xlsx').set(authed(A.token)).buffer().parse(binaryParser)).body) as Buffer); expect(full[0]).toContain('Prix d\'achat HT'); expect(full[0]).toEqual(expect.arrayContaining(['Code article', 'Désignation', 'Marque', 'Modèle', 'Catégorie', 'Sous-catégorie', 'Stock disponible', 'Statut']));
+    const full = await parseXlsx(((await api().get('/api/v1/products/export?format=xlsx').set(authed(A.token)).buffer().parse(binaryParser)).body) as Buffer); expect(full[0]).toContain('Prix d\'achat HT'); expect(full[0]).toEqual(expect.arrayContaining(['Code article', 'Désignation', 'Catégorie', 'Sous-catégorie', 'Devise d\'achat', 'Contre-valeur estimée', 'Coût de revient estimé', 'Stock disponible', 'Statut']));
+    expect(full[0]).not.toContain('Marque'); expect(full[0]).not.toContain('Modèle');
     void L;
   });
   it('isolation multi-société sur tous les onglets ; identifiants invalides ; injection NoSQL', async () => {
@@ -415,8 +415,8 @@ describe('fiche article — permissions par donnée sensible', () => {
       const r = m === 'put' ? await B.j.put(`/products/${id2}${path}`, body) : await B.j.post(`/products/${id2}${path}`, body); expect(r.status, path).toBe(404);
     }
     expect((await B.j.get('/products/pas-un-id/stock')).status).toBe(422);
-    for (const qs of ['status[$ne]=active', 'brand[$ne]=x', 'q[$regex]=.*', 'sort[$gt]=1', 'categoryId[$ne]=1', 'warehouseId[$ne]=1']) { const st = (await A.j.get(`/products?${qs}`)).status; expect([400, 422], qs).toContain(st); }
-    expect([400, 422]).toContain((await A.j.post('/products', { ...prod(), brand: { $ne: null } })).status); expect([400, 422]).toContain((await A.j.put(`/products/${id2}/customs`, { ddPct: { $gt: 0 } })).status);
+    for (const qs of ['status[$ne]=active', 'subCategoryId[$ne]=1', 'q[$regex]=.*', 'sort[$gt]=1', 'categoryId[$ne]=1', 'warehouseId[$ne]=1']) { const st = (await A.j.get(`/products?${qs}`)).status; expect([400, 422], qs).toContain(st); }
+    expect([400, 422]).toContain((await A.j.post('/products', { ...prod(), name: { $ne: null } })).status); expect([400, 422]).toContain((await A.j.put(`/products/${id2}/customs`, { ddPct: { $gt: 0 } })).status);
     expect((await B.j.get('/products?q=MACH-0001')).body.items.every((x: { id: string }) => x.id !== id2)).toBe(true);
   });
 });
@@ -425,33 +425,39 @@ describe('fiche article — duplication, import et export', () => {
   it('duplication : identité, packaging, prix et douane copiés ; ni stock, ni séries, ni documents, ni activités, ni coût de revient', async () => {
     const src = (await A.j.get('/products?q=MACH-0001')).body.items[0].id; await upload(A.token, src, PNG, 'photo.png', 'photo');
     const dup = await A.j.post(`/products/${src}/duplicate`, { reference: 'MACH-0001-B' }); expect(dup.status, JSON.stringify(dup.body)).toBe(201);
-    expect(dup.body).toMatchObject({ reference: 'MACH-0001-B', name: 'Machine industrielle (copie)', brand: 'Optimum', status: 'active', salePriceMinor: 100_000, minSalePriceMinor: 90_000, maxDiscountPct: 5, estimatedCostMinor: 65_000, costPriceMinor: null, hasPhoto: false, stockQty: 0 });
+    expect(dup.body).toMatchObject({ reference: 'MACH-0001-B', name: 'Machine industrielle (copie)', status: 'active', salePriceMinor: 100_000, minSalePriceMinor: 90_000, maxDiscountPct: 5, estimatedCostMinor: 65_000, costPriceMinor: null, hasPhoto: false, stockQty: 0 });
     expect(dup.body.packaging).toMatchObject({ lengthMm: 1200, volumeM3: 0.864 }); expect(dup.body.customs).toMatchObject({ tnHsCode: '0084520', ddPct: 10 });
     expect((await A.j.get(`/products/${dup.body.id}/documents`)).body.items).toEqual([]); expect((await A.j.get(`/products/${dup.body.id}/activities`)).body.items.map((x: { title: string }) => x.title)).toEqual(['Article créé (duplication)']);
     expect((await A.j.post(`/products/${src}/duplicate`, { reference: 'mach-0001-b' })).status).toBe(409); // code unique, insensible à la casse
   });
-  it('modèle d’import : toutes les colonnes de la fiche ; import à blanc, erreurs par ligne et colonne, application atomique', async () => {
+  it('modèle d’import : colonnes de la fiche ; import à blanc, erreurs par ligne et colonne, application atomique', async () => {
     const tpl = await api().get('/api/v1/products/import/template').set(authed(A.token)).buffer().parse(binaryParser); const rows = await parseXlsx(tpl.body as Buffer);
-    expect(rows[0]).toEqual(expect.arrayContaining(['Marque', 'Modèle', 'Longueur (mm)', 'Largeur (mm)', 'Hauteur (mm)', 'Poids net (kg)', 'Poids brut (kg)', 'Type d\'emballage', 'Nombre de colis', 'Devise d\'achat', 'Code NGP fournisseur', 'Code NGP tunisien', 'DD (%)', 'FODEC (%)', 'RPD (%)', 'Pays d\'origine', 'Statut']));
-    const head = 'Code article;Désignation;Unité;Code TVA;Prix de vente;Marque;Modèle;Longueur (mm);Largeur (mm);Hauteur (mm);Poids net (kg);Poids brut (kg);Nombre de colis;Code NGP tunisien;DD (%);Devise d\'achat;Prix d\'achat en devise;Prix minimum de vente;Statut';
-    const csv = (lines: string[]) => Buffer.from(`\uFEFF${head}\n${lines.join('\n')}\n`, 'utf8');
+    expect(rows[0]).toEqual(expect.arrayContaining(['Catégorie', 'Sous-catégorie', 'Longueur (mm)', 'Largeur (mm)', 'Hauteur (mm)', 'Poids net (kg)', 'Poids brut (kg)', 'Type d\'emballage', 'Devise d\'achat', 'Code NGP fournisseur', 'Code NGP tunisien', 'DD (%)', 'FODEC (%)', 'RPD (%)', 'Pays d\'origine', 'Statut']));
+    for (const h of ['Marque', 'Modèle', 'Nombre de colis']) expect(rows[0]).not.toContain(h);
+    const head = 'Code article;Désignation;Unité;Code TVA;Prix de vente;Longueur (mm);Largeur (mm);Hauteur (mm);Poids net (kg);Poids brut (kg);Code NGP tunisien;DD (%);Devise d\'achat;Prix d\'achat en devise;Prix minimum de vente;Statut';
+    const csv = (lines: string[], h = head) => Buffer.from(`\uFEFF${h}\n${lines.join('\n')}\n`, 'utf8');
     const post = (buf: Buffer, dry: boolean, mode = 'create') => api().post(`/api/v1/products/import?mode=${mode}&dryRun=${dry}`).set(authed(A.token)).attach('file', buf, 'import.csv');
-    const good = 'IMP-1;Tour à métaux;PCE;T19;12500,000;Optimum;TH-1;1200;800;900;850,5;920;2;0084520;10;EUR;1000,50;11000;Bloqué';
+    const good = 'IMP-1;Tour à métaux;PCE;T19;12500,000;1200;800;900;850,5;920;0084520;10;EUR;1000,50;11000;Bloqué';
     const dry = await post(csv([good]), true); expect(dry.body).toMatchObject({ total: 1, toCreate: 1, errors: [], applied: false }); expect(await Product.countDocuments({ companyId: A.companyId, reference: 'IMP-1' })).toBe(0);
-    const bad = await post(csv([good.replace('IMP-1', 'IMP-2').replace('1200;800;900;850,5;920', '1200;800;;850,5;800'), 'IMP-3;Mauvais;PCE;T19;100;;;;;;;;0;ab$c;-5;;;200;Inconnu']), true);
-    const msgs = bad.body.errors.map((e: { row: number; field: string; message: string }) => `${e.row}:${e.field}`); expect(msgs, JSON.stringify(bad.body.errors)).toEqual(expect.arrayContaining(['2:lengthMm', '3:parcelCount', '3:hsTn', '3:dd', '3:minSale', '3:status'])); expect(bad.body.applied).toBe(false);
-    const applied = await post(csv([good]), false); expect(applied.body).toMatchObject({ created: 1, applied: true }); const p = (await A.j.get('/products?q=IMP-1')).body.items[0];
-    expect(p, JSON.stringify(p)).toMatchObject({ brand: 'Optimum', model: 'TH-1', status: 'blocked', salePriceMinor: 12_500_000, minSalePriceMinor: 11_000_000, purchaseCurrency: 'EUR', purchasePriceForeignMinor: 100_050, purchaseRate: 3.4, purchasePriceMinor: 3_401_700 });
-    const full = (await A.j.get(`/products/${p.id}`)).body; expect(full.packaging).toMatchObject({ volumeM3: 0.864, totalVolumeM3: 1.728, netWeightKg: 850.5, grossWeightKg: 920, parcelCount: 2 }); expect(full.customs).toMatchObject({ tnHsCode: '0084520', ddPct: 10 });
+    const bad = await post(csv([good.replace('IMP-1', 'IMP-2').replace('1200;800;900;850,5;920', '1200;800;;850,5;800'), 'IMP-3;Mauvais;PCE;T19;100;;;;;;ab$c;-5;;;200;Inconnu']), true);
+    const msgs = bad.body.errors.map((e: { row: number; field: string; message: string }) => `${e.row}:${e.field}`); expect(msgs, JSON.stringify(bad.body.errors)).toEqual(expect.arrayContaining(['2:lengthMm', '2:packaging', '3:hsTn', '3:dd', '3:minSale', '3:status'])); expect(bad.body.applied).toBe(false);
+    const applied = await post(csv([good]), false); expect(applied.body).toMatchObject({ created: 1, applied: true, warnings: [] }); const p = (await A.j.get('/products?q=IMP-1')).body.items[0];
+    expect(p, JSON.stringify(p)).toMatchObject({ status: 'blocked', salePriceMinor: 12_500_000, minSalePriceMinor: 11_000_000, purchaseCurrency: 'EUR', purchasePriceForeignMinor: 100_050, purchaseRate: null, purchasePriceMinor: null, estimatedPurchaseMinor: 3_501_750 });
+    const full = (await A.j.get(`/products/${p.id}`)).body; expect(full.packaging).toMatchObject({ volumeM3: 0.864, netWeightKg: 850.5, grossWeightKg: 920 }); expect(full.customs).toMatchObject({ tnHsCode: '0084520', ddPct: 10 });
     expect((await post(csv([good]), false)).body.errors[0].message).toMatch(/existe déjà/); // mode création : doublon refusé
-    const up = await post(csv(['IMP-1;Tour à métaux v2;PCE;T19;12500,000;;;;;;;;;;;;;;Actif']), false, 'upsert'); expect(up.body.updated).toBe(1); expect((await A.j.get(`/products/${p.id}`)).body).toMatchObject({ name: 'Tour à métaux v2', status: 'active', brand: 'Optimum' }); // les colonnes absentes ne sont pas écrasées
+    // anciennes colonnes : ignorées et signalées ; colonnes absentes ou vides : rien n'est écrasé
+    const up = await post(csv(['IMP-1;Tour à métaux v2;PCE;T19;Optimum;TH-1;3'], 'Code article;Désignation;Unité;Code TVA;Marque;Modèle;Nombre de colis'), false, 'upsert');
+    expect(up.body.updated).toBe(1); expect(up.body.warnings.join(' ')).toMatch(/Marque, Modèle, Nombre de colis/);
+    const after = (await A.j.get(`/products/${p.id}`)).body;
+    expect(after).toMatchObject({ name: 'Tour à métaux v2', status: 'blocked', salePriceMinor: 12_500_000, purchasePriceForeignMinor: 100_050, estimatedPurchaseMinor: 3_501_750 });
+    expect((await Product.findById(p.id).lean())!.brand).toBeUndefined();
     expect(await Product.countDocuments({ companyId: A.companyId, reference: /^IMP-/i })).toBe(1); // les erreurs n'ont rien laissé : tout ou rien
     expect((await stockQty(p.id)).qty).toBe(0); // l'import n'écrit aucun stock
   });
   it('export CSV : formules neutralisées, filtres respectés, colonnes de la fiche', async () => {
-    const e = await A.j.post('/products', prod({ reference: 'EXP-F', name: '=HYPERLINK("http://evil")', brand: '+cmd' })); expect(e.status).toBe(201);
-    const csv = (await api().get('/api/v1/products/export?format=csv&q=EXP-F').set(authed(A.token)).buffer().parse(binaryParser)).body.toString('utf8'); expect(csv).toContain("'=HYPERLINK"); expect(csv).toContain("'+cmd"); expect(csv.split('\n').filter(Boolean)).toHaveLength(2);
-    expect(csv).toContain('Code article;Désignation;Marque;Modèle');
+    const e = await A.j.post('/products', prod({ reference: 'EXP-F', name: '=HYPERLINK("http://evil")', description: '+cmd' })); expect(e.status).toBe(201);
+    const csv = (await api().get('/api/v1/products/export?format=csv&q=EXP-F').set(authed(A.token)).buffer().parse(binaryParser)).body.toString('utf8'); expect(csv).toContain("'=HYPERLINK"); expect(csv.split('\n').filter(Boolean)).toHaveLength(2);
+    expect(csv).toContain('Code article;Désignation;Type;Catégorie;Sous-catégorie');
   });
 });
 

@@ -2,6 +2,7 @@ import PDFDocument from 'pdfkit';
 import { Company } from '../models/company.model.js';
 import { Setting } from '../models/setting.model.js';
 import type { Types } from 'mongoose';
+import { phoneDisplay } from '../utils/phone.js';
 
 export interface PdfDoc {
   title: string;                 // « DEVIS », « FACTURE PROFORMA », « FACTURE », « FACTURE D'AVOIR », « BON DE LIVRAISON »
@@ -13,8 +14,11 @@ export interface PdfDoc {
   totals: { grossMinor?: number | null | undefined; lineDiscountsMinor?: number | null | undefined; globalDiscountMinor?: number | null | undefined; totalHtMinor?: number | null | undefined;
     vatGroups?: { vatCode?: string | null | undefined; regime?: string | null | undefined; ratePct?: number | null | undefined; baseMinor?: number | null | undefined; vatMinor?: number | null | undefined }[] | null | undefined;
     totalVatMinor?: number | null | undefined; totalTtcMinor?: number | null | undefined; stampMinor?: number | null | undefined; withholdingMinor?: number | null | undefined; totalPayableMinor?: number | null | undefined };
-  withholdingLabel?: string; showPrices?: boolean; schedule?: { dueDate: Date; amountMinor: number }[]; notes?: string | null | undefined; terms?: string | null | undefined;
+  withholdingLabel?: string; showPrices?: boolean; schedule?: { dueDate: Date; amountMinor: number; percent?: number | null | undefined }[]; notes?: string | null | undefined; terms?: string | null | undefined;
   extra?: [string, string][];
+  paymentTerms?: string | null | undefined;
+  deliveryAddress?: { label?: string | null | undefined; street?: string | null | undefined; city?: string | null | undefined; postalCode?: string | null | undefined; country?: string | null | undefined;
+    contactName?: string | null | undefined; contactPhone?: string | null | undefined; instructions?: string | null | undefined } | null | undefined;
 }
 
 const REGIME: Record<string, string> = { zero: 'TVA 0 %', exempt: 'Exonéré', suspended: 'Suspension de TVA' };
@@ -23,7 +27,8 @@ export async function renderDocumentPdf(companyId: Types.ObjectId, d: PdfDoc): P
   const [company, settings] = await Promise.all([Company.findById(companyId).lean(), Setting.findOne({ companyId }).lean()]);
   const dec = settings?.currencies.find((c) => c.code === settings.baseCurrency)?.decimals ?? 3;
   const cur = settings?.currencies.find((c) => c.code === settings.baseCurrency)?.symbol ?? settings?.baseCurrency ?? '';
-  const m = (v: number | null | undefined) => ((v ?? 0) / 10 ** dec).toLocaleString('fr-FR', { minimumFractionDigits: dec, maximumFractionDigits: dec });
+  // La police standard du PDF ignore l'espace fine insécable (U+202F) du format français : espace insécable classique
+  const m = (v: number | null | undefined) => ((v ?? 0) / 10 ** dec).toLocaleString('fr-FR', { minimumFractionDigits: dec, maximumFractionDigits: dec }).replace(/\u202f/g, '\u00a0');
   const dt = (x: Date) => new Date(x).toLocaleDateString('fr-FR', { timeZone: 'UTC' });
 
   const doc = new PDFDocument({ size: 'A4', margin: 40, compress: process.env.NODE_ENV !== 'test', info: { Title: `${d.title} ${d.number ?? ''}` } }); // flux non compressé en test : le contenu est vérifiable
@@ -43,11 +48,22 @@ export async function renderDocumentPdf(companyId: Types.ObjectId, d: PdfDoc): P
 
   // Client
   doc.y = Math.max(doc.y, 130) + 6;
-  const cy = doc.y; doc.rect(L + W / 2, cy, W / 2, 62).stroke('#bbb');
+  const cy = doc.y;
   const a = d.customer.address;
   doc.font('Helvetica-Bold').fontSize(10).text(d.customer.name ?? '', L + W / 2 + 8, cy + 6, { width: W / 2 - 16 });
   doc.font('Helvetica').fontSize(9).text([[a?.street].filter(Boolean).join(''), [a?.postalCode, a?.city].filter(Boolean).join(' '), d.customer.taxId ? `MF : ${d.customer.taxId}` : ''].filter(Boolean).join('\n'), L + W / 2 + 8, doc.y, { width: W / 2 - 16 });
-  doc.y = cy + 74;
+  let boxBottom = Math.max(doc.y + 6, cy + 62);
+  const s = d.deliveryAddress;
+  if (s) { // adresse de livraison à gauche du bloc client
+    doc.font('Helvetica').fontSize(8).fillColor('#666').text('LIVRAISON', L + 8, cy + 6, { width: W / 2 - 24 }).fillColor('#000');
+    if (s.label) doc.font('Helvetica-Bold').fontSize(9).text(s.label, L + 8, doc.y, { width: W / 2 - 24 });
+    doc.font('Helvetica').fontSize(9).text([s.street, [s.postalCode, s.city].filter(Boolean).join(' '), s.country,
+      [s.contactName, phoneDisplay(s.contactPhone, s.country)].filter(Boolean).join(' — '), s.instructions].filter(Boolean).join('\n'), L + 8, doc.y, { width: W / 2 - 24 });
+    boxBottom = Math.max(boxBottom, doc.y + 6);
+    doc.rect(L, cy, W / 2 - 8, boxBottom - cy).stroke('#bbb');
+  }
+  doc.rect(L + W / 2, cy, W / 2, boxBottom - cy).stroke('#bbb');
+  doc.y = boxBottom + 12;
 
   // Tableau des lignes
   const showPrices = d.showPrices !== false;
@@ -85,11 +101,14 @@ export async function renderDocumentPdf(companyId: Types.ObjectId, d: PdfDoc): P
     if ((t.withholdingMinor ?? 0) > 0) row(d.withholdingLabel ?? 'Retenue à la source', `- ${m(t.withholdingMinor)}`);
     if ((t.stampMinor ?? 0) > 0 || (t.withholdingMinor ?? 0) > 0) row(`Net à payer (${cur})`, m(t.totalPayableMinor), true);
     doc.y = Math.max(doc.y, ty);
-    if (d.schedule?.length) { doc.moveDown(0.5).font('Helvetica-Bold').fontSize(9).text('Échéancier', L); doc.font('Helvetica'); for (const s of d.schedule) doc.text(`${dt(s.dueDate)} — ${m(s.amountMinor)} ${cur}`, L); }
+    // En brouillon, les montants des échéances ne sont pas encore calculés : le pourcentage saisi est imprimé
+    if (d.schedule?.length) { doc.moveDown(0.5).font('Helvetica-Bold').fontSize(9).text('Échéancier', L); doc.font('Helvetica'); for (const s of d.schedule) doc.text(`${dt(s.dueDate)} — ${d.draft && !s.amountMinor ? `${s.percent ?? 0} %` : `${m(s.amountMinor)} ${cur}`}`, L); }
   }
+  if (d.paymentTerms) doc.moveDown().font('Helvetica').fontSize(8.5).fillColor('#444').text(`Conditions de paiement : ${d.paymentTerms}`, L, doc.y, { width: W });
   if (d.terms) doc.moveDown().font('Helvetica').fontSize(8.5).fillColor('#444').text(`Conditions : ${d.terms}`, L, doc.y, { width: W });
   if (d.notes) doc.moveDown(0.5).fillColor('#444').text(d.notes, L, doc.y, { width: W });
-  doc.fillColor('#888').fontSize(7.5).text(`${company?.name ?? ''} — montants en ${cur}`, L, doc.page.height - 40, { width: W, align: 'center' });
+  doc.page.margins.bottom = 0; // le pied de page est dans la marge basse : sans cela il serait rejeté sur une page vide
+  doc.fillColor('#888').fontSize(7.5).text(`${company?.name ?? ''} — montants en ${cur}`, L, doc.page.height - 40, { width: W, align: 'center', lineBreak: false });
   doc.end();
   return done;
 }

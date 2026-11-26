@@ -1,12 +1,18 @@
 import { Schema, model, type InferSchemaType } from 'mongoose';
 import { addressSchema, contactSchema } from '../modules/parties/party.shared.js';
+import { deliveryAddressSchema } from '../modules/parties/delivery-address.js';
 
 const supplierSchema = new Schema(
   {
     companyId: { type: Schema.Types.ObjectId, ref: 'Company', required: true },
+    /** Code fournisseur lisible (FR-00001), attribué par un compteur atomique ; unique par société. */
+    code: { type: String, trim: true },
     name: { type: String, required: true, trim: true },
+    tradeName: { type: String, trim: true },
     taxId: { type: String, trim: true },
     address: { type: addressSchema, default: () => ({}) },
+    /** Adresses de livraison / d'enlèvement du fournisseur (une seule par défaut). */
+    deliveryAddresses: { type: [deliveryAddressSchema], default: [] },
     phone: { type: String, trim: true },
     email: { type: String, trim: true, lowercase: true },
     contacts: { type: [contactSchema], default: [] },
@@ -27,6 +33,7 @@ const supplierSchema = new Schema(
 );
 supplierSchema.index({ companyId: 1, taxId: 1 }, { unique: true, partialFilterExpression: { taxId: { $type: 'string' } } });
 supplierSchema.index({ companyId: 1, name: 1 });
+supplierSchema.index({ companyId: 1, code: 1 }, { unique: true, partialFilterExpression: { code: { $type: 'string' } } });
 supplierSchema.index({ companyId: 1, isArchived: 1, balanceMinor: -1 });
 export type SupplierDoc = InferSchemaType<typeof supplierSchema>;
 export const Supplier = model('Supplier', supplierSchema);

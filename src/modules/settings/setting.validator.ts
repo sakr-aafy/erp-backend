@@ -14,3 +14,9 @@ export const updateSettingsBody = z.object({
   dup(v.currencies, 'code', 'currencies'); dup(v.numbering, 'docType', 'numbering');
   if (v.baseCurrency && v.currencies && !v.currencies.some((c) => c.code === v.baseCurrency)) ctx.addIssue({ code: 'custom', path: ['baseCurrency'], message: 'La devise de base doit figurer dans la liste des devises' });
 });
+
+/** Modification du taux estimatif d'une devise déjà paramétrée (aucune autre devise n'est ajoutée implicitement). */
+export const estimateRateBody = z.object({
+  currency: z.string().trim().length(3).toUpperCase(),
+  rate: z.number().gt(0, 'Taux strictement positif').max(1000).refine((r) => Math.abs(r * 1e6 - Math.round(r * 1e6)) < 1e-4, '6 décimales maximum'),
+}).strict();

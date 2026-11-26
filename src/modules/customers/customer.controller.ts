@@ -3,6 +3,7 @@ import { Setting } from '../../models/setting.model.js';
 import { audit } from '../../services/audit.service.js';
 import { renderTable, toPdfFiche, type ExportFormat } from '../../services/export.service.js';
 import * as svc from './customer.service.js';
+import { addressRows } from '../parties/delivery-address.js';
 
 const cid = (req: Request) => req.auth!.companyId;
 const pid = (req: Request) => req.params.id as string;
@@ -68,10 +69,11 @@ export async function fichePdf(req: Request, res: Response) {
   const m = (v: number | null) => (v == null ? 'Illimitée' : (v / 10 ** d).toFixed(d));
   const line = (a: { street: string; city: string; postalCode: string; country: string }) => [a.street, [a.postalCode, a.city].filter(Boolean).join(' '), a.country].filter(Boolean).join(', ');
   const body = await toPdfFiche(`Fiche client — ${c.name}`, [
-    { title: 'Identification', rows: [['Code client', c.code ?? ''], ['Type', c.type === 'walk_in' ? 'Passager' : 'Société'], ['Raison sociale', c.name], ['Nom commercial', c.tradeName ?? ''], ['Matricule fiscal', c.taxId ?? ''], ['Registre de commerce', c.registryNumber ?? ''], ['Secteur d’activité', c.sector ?? ''], ['Statut', c.statusLabel]] },
-    { title: 'Coordonnées', rows: [['Adresse de facturation', line(c.address)], ['Adresse de livraison', c.shippingSameAsBilling ? 'Identique à la facturation' : line(c.shippingAddress)], ['Téléphone', c.phone ?? ''], ['Téléphone secondaire', c.secondaryPhone ?? ''], ['E-mail', c.email ?? ''], ['Site Internet', c.website ?? ''], ['Facebook', c.social.facebook ?? ''], ['LinkedIn', c.social.linkedin ?? ''], ['Instagram', c.social.instagram ?? ''], ['Localisation', c.mapsUrl ?? '']] },
-    { title: 'Conditions commerciales', rows: [['Conditions de paiement', c.paymentTerms ?? ''], ['Délai de paiement', `${c.paymentDelayDays} jour(s)`], ['Mode de paiement habituel', c.paymentMethod ?? ''], ['Remise habituelle', `${c.discountPct} %`], ['Limite de crédit', m(c.creditLimitMinor)], ['Solde courant', m(c.balanceMinor)], ['Retenue à la source', c.subjectToWithholding ? 'Oui' : 'Non'], ['Exonéré du timbre', c.stampExempt ? 'Oui' : 'Non']] },
-    { title: 'Contacts', rows: c.contacts.length ? c.contacts.map((k) => [k.name + (k.isPrimary ? ' (principal)' : ''), [k.role, k.phone, k.email].filter(Boolean).join(' · ')] as [string, string]) : [['—', 'Aucun contact']] },
+    { title: 'Identification', rows: [['Code client', c.code ?? ''], ['Type', c.type === 'walk_in' ? 'Passager' : 'Société'], ['Raison sociale', c.name], ['Nom commercial', c.tradeName ?? ''], ['Matricule fiscal', c.taxId ?? ''], ['Statut', c.statusLabel]] },
+    { title: 'Coordonnées', rows: [['Adresse de facturation', line(c.address)], ['Téléphone', c.phoneInfo?.display ?? ''], ['Téléphone secondaire', c.secondaryPhoneInfo?.display ?? ''], ['E-mail', c.email ?? ''], ['Site Internet', c.website ?? ''], ['Facebook', c.social.facebook ?? ''], ['LinkedIn', c.social.linkedin ?? ''], ['Instagram', c.social.instagram ?? ''], ['Localisation', c.mapsUrl ?? '']] },
+    { title: 'Adresses de livraison', rows: addressRows(c.deliveryAddresses) },
+    { title: 'Conditions commerciales', rows: [['Conditions de paiement', c.paymentTerms ?? ''], ['Délai de paiement', c.paymentTermsCustom ? 'Conditions personnalisées : échéances saisies sur chaque facture' : `${c.paymentDelayDays} jour(s)`], ['Mode de paiement habituel', c.paymentMethod ?? ''], ['Remise habituelle', `${c.discountPct} %`], ['Limite de crédit', m(c.creditLimitMinor)], ['Solde courant', m(c.balanceMinor)], ['Retenue à la source', c.subjectToWithholding ? 'Oui' : 'Non'], ['Exonéré du timbre', c.stampExempt ? 'Oui' : 'Non']] },
+    { title: 'Contacts', rows: c.contacts.length ? c.contacts.map((k) => [k.name + (k.isPrimary ? ' (principal)' : ''), [k.role, k.phoneInfo?.display, k.email].filter(Boolean).join(' · ')] as [string, string]) : [['—', 'Aucun contact']] },
   ]);
   await audit(req, { action: 'print', resource: 'customer', resourceId: c.id });
   send(res, { body, contentType: 'application/pdf', filename: `fiche-client-${c.code ?? c.id}.pdf` });

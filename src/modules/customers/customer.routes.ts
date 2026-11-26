@@ -14,6 +14,9 @@ import * as extra from './customer.extra.service.js';
 import { MAX_DOC_BYTES } from './customer.files.js';
 import { customerBalanceCheck } from '../invoices/invoice.service.js';
 import * as v from './customer.validator.js';
+import { Customer } from '../../models/customer.model.js';
+import { DeliveryNote, Invoice, Proforma, Quotation } from '../../models/sales.model.js';
+import { mountDeliveryAddresses } from '../parties/delivery-address.routes.js';
 
 export const customerRoutes = Router();
 customerRoutes.use(authenticate);
@@ -108,3 +111,14 @@ customerRoutes.get('/:id/activities', can('customers:view'), validate({ params: 
 customerRoutes.post('/:id/activities', can('customers:update'), validate({ params: v.idParam, body: v.activityBody }), h(async (req: Request, res: Response) => res.status(201).json(await extra.addActivity(cid(req), pid(req), req.body, actor(req)))));
 customerRoutes.put('/:id/activities/:activityId', can('customers:update'), validate({ params: v.activityParams, body: v.activityUpdateBody }), h(async (req: Request, res: Response) => res.json(await extra.updateActivity(cid(req), pid(req), req.params.activityId as string, req.body))));
 customerRoutes.delete('/:id/activities/:activityId', can('customers:update'), validate({ params: v.activityParams }), h(async (req: Request, res: Response) => { await extra.removeActivity(cid(req), pid(req), req.params.activityId as string); res.status(204).end(); }));
+
+// ---- Adresses de livraison ----
+mountDeliveryAddresses(customerRoutes, {
+  resource: 'customer', permission: 'customers:update', model: Customer, notFound: 'Client introuvable', dto: (companyId, id) => svc.get(companyId, id),
+  readOnly: (c) => (svc.effectiveStatus(c) === 'archived' ? 'Client archivé : réactivez-le avant de modifier ses adresses' : null),
+  onChange: (req, id, title) => svc.logAuto(cid(req), id, 'customer_updated', title, actor(req)),
+  isReferenced: async (companyId, addressId, customerId) => {
+    const q = { companyId, customerId, 'deliveryAddress.addressId': addressId };
+    return !!(await Quotation.exists(q) || await Proforma.exists(q) || await Invoice.exists(q) || await DeliveryNote.exists(q));
+  },
+});

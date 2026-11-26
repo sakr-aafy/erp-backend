@@ -3,6 +3,7 @@ import { Setting } from '../../models/setting.model.js';
 import { audit } from '../../services/audit.service.js';
 import { renderTable, toPdfFiche, type ExportFormat } from '../../services/export.service.js';
 import * as svc from './supplier.service.js';
+import { addressRows } from '../parties/delivery-address.js';
 
 const cid = (req: Request) => req.auth!.companyId;
 const pid = (req: Request) => req.params.id as string;
@@ -52,8 +53,9 @@ export async function fichePdf(req: Request, res: Response) {
   const m = (v: number | null) => (v == null ? '—' : (v / 10 ** d).toFixed(d));
   const a = s.address as { street?: string; city?: string; postalCode?: string; country?: string };
   const body = await toPdfFiche(`Fiche fournisseur — ${s.name}`, [
-    { title: 'Identification', rows: [['Raison sociale', s.name], ['Matricule fiscal', s.taxId ?? ''], ['Fournisseur étranger', s.isForeign ? `Oui (${s.currency ?? '—'})` : 'Non'], ['Statut', s.isArchived ? 'Archivé' : 'Actif']] },
+    { title: 'Identification', rows: [['Code fournisseur', s.code ?? ''], ['Raison sociale', s.name], ['Nom commercial', s.tradeName ?? ''], ['Matricule fiscal', s.taxId ?? ''], ['Fournisseur étranger', s.isForeign ? `Oui (${s.currency ?? '—'})` : 'Non'], ['Statut', s.isArchived ? 'Archivé' : 'Actif']] },
     { title: 'Coordonnées', rows: [['Adresse', [a.street, a.postalCode, a.city, a.country].filter(Boolean).join(', ')], ['Téléphone', s.phone ?? ''], ['E-mail', s.email ?? '']] },
+    { title: 'Adresses de livraison', rows: addressRows(s.deliveryAddresses) },
     { title: 'Conditions d’achat', rows: [['Délai de livraison habituel', s.leadTimeDays == null ? '' : `${s.leadTimeDays} jour(s)`], ['Conditions de paiement', s.paymentTerms ?? ''], ['Délai de paiement', `${s.paymentDelayDays} jour(s)`], ['Solde dû', m(s.balanceMinor)], ['Seuil de blocage', m(s.effectiveThresholdMinor)]] },
     { title: 'Contacts', rows: s.contacts.length ? s.contacts.map((k) => [k.name + (k.isPrimary ? ' (principal)' : ''), [k.role, k.phone, k.email].filter(Boolean).join(' · ')] as [string, string]) : [['—', 'Aucun contact']] },
   ]);

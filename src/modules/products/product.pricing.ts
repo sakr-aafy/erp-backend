@@ -8,21 +8,21 @@ const r = (x: number, d: number) => Math.round(x * 10 ** d) / 10 ** d;
 const num = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 
 export interface Packaging { lengthMm?: number | null | undefined; widthMm?: number | null | undefined; heightMm?: number | null | undefined; netWeightKg?: number | null | undefined; grossWeightKg?: number | null | undefined;
-  parcelCount?: number | null | undefined; dimensionsPerParcel?: boolean | null | undefined }
+  /** Champs historiques (saisie « par colis », supprimée) : conservés en base, plus modifiés. */
+  parcelCount?: number | null | undefined; dimensionsPerParcel?: boolean | null | undefined; reviewedAt?: Date | null | undefined }
 
 /**
- * Volume d'un colis : (L × l × h en mm) / 1 000 000 000 = m³ (9 décimales). Absent si une dimension manque.
- * Volume total : volume × nombre de colis SI les dimensions sont celles d'un colis (dimensionsPerParcel, par défaut) ; sinon les dimensions
- * représentent déjà l'ensemble de l'emballage et le volume total est le volume lui-même (jamais de multiplication automatique abusive).
+ * Volume total (m³) = longueur × largeur × hauteur (mm) / 1 000 000 000 — jamais multiplié par un nombre de colis.
+ * Conservé à 12 décimales (seul le bruit binaire est retiré, aucun arrondi logistique). null si une dimension manque.
  */
-export function volumes(p: Packaging | null | undefined): { volumeM3: number | null; totalVolumeM3: number | null; multiplied: boolean } {
-  if (!p || !num(p.lengthMm) || !num(p.widthMm) || !num(p.heightMm)) return { volumeM3: null, totalVolumeM3: null, multiplied: false };
-  const unit = r((p.lengthMm * p.widthMm * p.heightMm) / 1_000_000_000, 9);
-  const multiply = p.dimensionsPerParcel !== false && num(p.parcelCount) && p.parcelCount > 1;
-  return { volumeM3: unit, totalVolumeM3: multiply ? r(unit * p.parcelCount!, 9) : unit, multiplied: !!multiply };
+export function volumeM3(p: Packaging | null | undefined): number | null {
+  if (!p || !num(p.lengthMm) || !num(p.widthMm) || !num(p.heightMm)) return null;
+  return r((p.lengthMm * p.widthMm * p.heightMm) / 1_000_000_000, 12);
 }
+/** Ancienne saisie « dimensions d'un colis × N colis » : les dimensions doivent être revérifiées (rien n'est présumé). */
+export const needsDimensionReview = (p: Packaging | null | undefined) => !!p && (p.parcelCount ?? 0) > 1 && p.dimensionsPerParcel !== false && !p.reviewedAt;
 
-/** Règles métier du packaging (le serveur est l'autorité ; le front ne fait que prévenir). */
+/** Règles métier des dimensions et poids (le serveur est l'autorité ; le front ne fait que prévenir). */
 export function packagingProblems(p: Packaging | null | undefined): string[] {
   if (!p) return [];
   const out: string[] = [];
@@ -30,7 +30,6 @@ export function packagingProblems(p: Packaging | null | undefined): string[] {
     const v = p[k]; if (v !== undefined && v !== null && (!num(v) || v < 0)) out.push(`${label} : valeur négative ou invalide`);
   }
   if (num(p.netWeightKg) && num(p.grossWeightKg) && p.grossWeightKg < p.netWeightKg) out.push('Le poids brut ne peut pas être inférieur au poids net');
-  if (p.parcelCount !== undefined && p.parcelCount !== null && (!Number.isInteger(p.parcelCount) || p.parcelCount < 1)) out.push('Le nombre de colis doit être un entier positif');
   return out;
 }
 

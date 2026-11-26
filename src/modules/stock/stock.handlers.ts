@@ -2,6 +2,7 @@ import { DeliveryNote } from '../../models/sales.model.js';
 import { GoodsReceipt, Inventory, StockLevel, StockMovement, StockTransfer } from '../../models/logistics.model.js';
 import { Product } from '../../models/product.model.js';
 import { applyMovement, defaultWarehouseId } from '../../services/stock.service.js';
+import { realPurchaseMinor } from '../products/purchase-price.js';
 import { onDomainEvent } from '../../services/domain-events.js';
 
 /**
@@ -84,7 +85,8 @@ export function registerStockHandlers() {
       if (delta < 0) await applyMovement({ companyId: ctx.companyId, session: ctx.session, userId: ctx.userId, productId: l.productId!, warehouseId: inv.warehouseId!, direction: 'out', quantity: -delta, reason: 'inventory_out', eventKey: key, source: src, note: inv.reason ?? undefined });
       else {
         const p = await Product.findById(l.productId).session(ctx.session).lean();
-        const unit = level && level.qty > 0 ? Math.round(level.valueMinor / level.qty) : (p?.costPriceMinor ?? p?.purchasePriceMinor ?? 0);
+        // Excédent d'inventaire sans stock valorisé : coût réel, sinon prix d'achat au taux RÉEL du jour (jamais le taux estimatif)
+        const unit = level && level.qty > 0 ? Math.round(level.valueMinor / level.qty) : (p?.costPriceMinor ?? (p ? await realPurchaseMinor(ctx.companyId, p, inv.date, ctx.session) : 0));
         await applyMovement({ companyId: ctx.companyId, session: ctx.session, userId: ctx.userId, productId: l.productId!, warehouseId: inv.warehouseId!, direction: 'in', quantity: delta, reason: 'inventory_in', eventKey: key, source: src, unitCostMinor: unit, note: inv.reason ?? undefined });
       }
       n++;

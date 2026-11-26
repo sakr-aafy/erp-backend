@@ -70,12 +70,13 @@ export function toPdfTable<T>(title: string, subtitle: string, cols: Column<T>[]
 export interface FicheSection { title: string; rows: [string, string][] }
 /** Fiche imprimable (client / fournisseur). */
 export function toPdfFiche(title: string, sections: FicheSection[]): Promise<Buffer> {
-  const doc = new PDFDocument({ size: 'A4', margin: 50, info: { Title: title } });
+  const doc = new PDFDocument({ size: 'A4', margin: 50, compress: process.env.NODE_ENV !== 'test', info: { Title: title } }); // flux non compressé en test : contenu vérifiable
   doc.font('Helvetica-Bold').fontSize(20).text(title); doc.moveDown();
   for (const s of sections) {
     if (doc.y > doc.page.height - 120) doc.addPage();
-    doc.font('Helvetica-Bold').fontSize(12).fillColor('#015581').text(s.title).fillColor('#000'); doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke('#ccc'); doc.moveDown(0.4);
+    doc.font('Helvetica-Bold').fontSize(12).fillColor('#015581').text(s.title, 50, doc.y).fillColor('#000'); doc.moveTo(50, doc.y).lineTo(545, doc.y).stroke('#ccc'); doc.moveDown(0.4);
     for (const [k, v] of s.rows) {
+      if (doc.y > doc.page.height - 100) doc.addPage();
       const y = doc.y; doc.font('Helvetica').fontSize(10).fillColor('#666').text(k, 50, y, { width: 150 });
       doc.fillColor('#000').text(v || '—', 210, y, { width: 335 }); doc.y = Math.max(doc.y, y + 14);
     }

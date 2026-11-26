@@ -11,7 +11,8 @@ import { ensureCounter, nextDocumentNumber } from '../../services/numbering.serv
 import { startOfDay } from '../../services/fiscal.service.js';
 import { computeDocument, groupKey, type DocTotals, pctOf, proportion, type CalcLine, type VatRegime } from '../../services/calculation.service.js';
 import { assertCanSell } from '../customers/customer.service.js';
-import { buildDocument, linesToInput, type BuiltLine, type DocInput, type LineInput } from '../sales/document.builder.js';
+import { buildDocument, frozenOf, inheritFrom, linesToInput, type BuiltLine, type DocInput, type Inherited, type LineInput } from '../sales/document.builder.js';
+import { snapshotDto } from '../parties/delivery-address.js';
 import { rangeFilter } from '../sales/document.http.js';
 
 type Id = Types.ObjectId;
@@ -25,7 +26,7 @@ export function toDto(i: Lean) {
   const open = (s: { amountMinor?: number | null; paidMinor?: number | null; creditedMinor?: number | null }) => Math.max(0, (s.amountMinor ?? 0) - (s.paidMinor ?? 0) - (s.creditedMinor ?? 0));
   const overdue = balanceDue > 0 && i.schedule.some((s) => s.dueDate < today && open(s) > 0);
   return {
-    id: i._id.toString(), type: i.type, number: i.number ?? null, status: i.status, customerId: i.customerId.toString(), customer: i.customerSnapshot, issueDate: i.issueDate,
+    id: i._id.toString(), paymentTerms: i.paymentTerms ?? null, paymentTermsCustom: !!i.paymentTermsCustom, deliveryAddress: snapshotDto(i.deliveryAddress as never), type: i.type, number: i.number ?? null, status: i.status, customerId: i.customerId.toString(), customer: i.customerSnapshot, issueDate: i.issueDate,
     lines: i.lines.map((l) => ({ ...l, id: (l as { _id: Id })._id.toString() })), globalDiscountPct: i.globalDiscountPct, globalDiscountMinor: i.globalDiscountMinor,
     withholdingOperationType: i.withholdingOperationType ?? null, withholding: i.withholding ?? null, stamp: i.stamp ?? null, totals: i.totals, notes: i.notes ?? null,
     paymentMethod: i.paymentMethod ?? null, schedule: i.schedule.map((s) => ({ id: (s as { _id: Id })._id.toString(), dueDate: s.dueDate, percent: s.percent ?? null, amountMinor: s.amountMinor, paidMinor: s.paidMinor, creditedMinor: s.creditedMinor ?? 0, openMinor: open(s) })),
@@ -58,18 +59,18 @@ export async function getOwn(companyId: Id, id: string, session?: ClientSession)
 export const get = async (c: Id, id: string) => toDto(await getOwn(c, id));
 
 export interface InvoiceBody extends DocInput { issueDate?: Date | undefined; paymentMethod?: string | undefined; schedule?: { dueDate: Date; percent: number }[] | undefined; notes?: string | undefined }
-export interface Sources { quotationId?: Id; proformaId?: Id; deliveryNoteIds?: Id[]; type?: 'invoice' | 'credit_note'; creditedInvoiceId?: Id; creditReason?: string; lineDeliveredFull?: boolean }
+export interface Sources { quotationId?: Id; proformaId?: Id; deliveryNoteIds?: Id[]; type?: 'invoice' | 'credit_note'; creditedInvoiceId?: Id; creditReason?: string; lineDeliveredFull?: boolean; inherit?: Inherited | undefined }
 
 /** Crée une facture BROUILLON (sans numéro). Utilisable seule (transaction propre) ou dans une transaction existante. */
 export async function createDraft(companyId: Id, userId: Id, b: InvoiceBody, sources: Sources = {}, outer?: ClientSession) {
   const run = async (session: ClientSession) => {
     const issueDate = startOfDay(b.issueDate ?? new Date());
     const docType = sources.type === 'credit_note' ? 'creditNote' : 'invoice';
-    const doc = await buildDocument(companyId, docType, b, { date: issueDate, session });
+    const doc = await buildDocument(companyId, docType, b, { date: issueDate, session, ...(sources.inherit && { inherit: sources.inherit }) });
     if (sources.lineDeliveredFull) doc.lines.forEach((l) => { l.deliveredQty = l.quantity; });
     const [c] = await Invoice.create([{ companyId, type: sources.type ?? 'invoice', status: 'draft', customerId: doc.customer._id, customerSnapshot: doc.customerSnapshot, issueDate, paymentMethod: b.paymentMethod,
       schedule: (b.schedule ?? []).map((s) => ({ dueDate: startOfDay(s.dueDate), percent: s.percent })), lines: doc.lines, globalDiscountPct: doc.globalDiscountPct, globalDiscountMinor: doc.globalDiscountMinor,
-      withholdingOperationType: doc.withholdingOperationType, withholding: doc.withholding, stamp: doc.stamp, totals: doc.totals, notes: b.notes, createdBy: userId,
+      withholdingOperationType: doc.withholdingOperationType, withholding: doc.withholding, stamp: doc.stamp, totals: doc.totals, notes: b.notes, ...frozenOf(doc), createdBy: userId,
       ...(sources.quotationId && { quotationId: sources.quotationId }), ...(sources.proformaId && { proformaId: sources.proformaId }), ...(sources.deliveryNoteIds && { deliveryNoteIds: sources.deliveryNoteIds }),
       ...(sources.creditedInvoiceId && { creditedInvoiceId: sources.creditedInvoiceId, creditReason: sources.creditReason }) }] as never[], { session });
     return toDto(c!.toObject() as Lean);
@@ -83,13 +84,14 @@ export async function updateDraft(companyId: Id, id: string, b: InvoiceBody) {
   if (cur.type === 'credit_note') throw AppError.conflict('Un avoir en brouillon ne se modifie pas : supprimez-le et recréez-le');
   const issueDate = startOfDay(b.issueDate ?? cur.issueDate);
   return withTransaction(async (session) => {
-    const doc = await buildDocument(companyId, 'invoice', b, { date: issueDate, session });
+    const inherit = inheritFrom(cur, b.customerId);
+    const doc = await buildDocument(companyId, 'invoice', b, { date: issueDate, session, ...(inherit && { inherit }) });
     if ((cur.deliveryNoteIds ?? []).length) { // facture issue de BL : les lignes livrées restent liées
       doc.lines.forEach((l) => { l.deliveredQty = l.quantity; });
     }
     const u = await Invoice.findOneAndUpdate({ _id: id, companyId, status: 'draft' }, { $set: { customerId: doc.customer._id, customerSnapshot: doc.customerSnapshot, issueDate, paymentMethod: b.paymentMethod,
       schedule: (b.schedule ?? []).map((s) => ({ dueDate: startOfDay(s.dueDate), percent: s.percent })), lines: doc.lines, globalDiscountPct: doc.globalDiscountPct, globalDiscountMinor: doc.globalDiscountMinor,
-      withholdingOperationType: doc.withholdingOperationType ?? null, withholding: doc.withholding ?? null, stamp: doc.stamp ?? null, totals: doc.totals, notes: b.notes } }, { returnDocument: 'after', session }).lean();
+      withholdingOperationType: doc.withholdingOperationType ?? null, withholding: doc.withholding ?? null, stamp: doc.stamp ?? null, totals: doc.totals, notes: b.notes, ...frozenOf(doc) } }, { returnDocument: 'after', session }).lean();
     if (!u) throw AppError.conflict('La facture a changé entre-temps');
     return toDto(u as Lean);
   });
@@ -120,11 +122,27 @@ export async function createFromDeliveryNotes(companyId: Id, userId: Id, ids: st
     }
     const lines: LineInput[] = bls.flatMap((b) => linesToInput(b.lines));
     const inv = await createDraft(companyId, userId, { customerId: bls[0]!.customerId, lines, ...(issueDate && { issueDate }), notes: `BL : ${bls.map((b) => b.number).join(', ')}` },
-      { deliveryNoteIds: bls.map((b) => b._id), lineDeliveredFull: true }, session);
+      { deliveryNoteIds: bls.map((b) => b._id), lineDeliveredFull: true, inherit: await inheritFromDeliveries(companyId, bls, session) }, session);
     const r = await DeliveryNote.updateMany({ _id: { $in: bls.map((b) => b._id) }, invoiceId: { $exists: false } }, { invoiceId: new Types.ObjectId(inv.id) }, { session }); // garde de concurrence
     if (r.modifiedCount !== bls.length) throw AppError.conflict('Un bon de livraison vient d’être facturé par ailleurs');
     return inv;
   });
+}
+
+/**
+ * Facture issue de bons de livraison : adresse commune aux BL (aucune s'ils diffèrent) et, lorsqu'ils proviennent tous
+ * du même devis / proforma, conditions de paiement de ce document source (sinon celles du client).
+ */
+async function inheritFromDeliveries(companyId: Id, bls: { deliveryAddress?: unknown; source?: { type?: string | null; id?: Id | null } | null }[], session: ClientSession): Promise<Inherited> {
+  const keys = new Set(bls.map((b) => JSON.stringify(b.deliveryAddress)));
+  const out: Inherited = { deliveryAddress: keys.size === 1 ? bls[0]!.deliveryAddress : null };
+  const sources = new Set(bls.map((b) => (b.source?.id ? `${b.source.type}:${b.source.id}` : '')));
+  const src = bls[0]!.source;
+  if (sources.size === 1 && src?.id && (src.type === 'quotation' || src.type === 'proforma')) {
+    const d = await (src.type === 'quotation' ? Quotation : Proforma as unknown as typeof Quotation).findOne({ _id: src.id, companyId }).session(session).lean();
+    if (d) Object.assign(out, { paymentTerms: d.paymentTerms, paymentTermsCustom: d.paymentTermsCustom });
+  }
+  return out;
 }
 
 /** Avoir (brouillon) depuis une facture validée : total (quantités restantes) ou partiel par ligne ; montants proportionnels. */
@@ -137,7 +155,7 @@ export async function createCreditNote(companyId: Id, userId: Id, invoiceId: str
     if (!wanted.length) throw AppError.conflict('Cette facture est déjà intégralement créditée');
     const doc = await buildCreditDocument(companyId, inv, wanted, session);
     const [c] = await Invoice.create([{ companyId, type: 'credit_note', status: 'draft', customerId: inv.customerId, customerSnapshot: inv.customerSnapshot, issueDate: startOfDay(new Date()), lines: doc.lines, withholdingOperationType: inv.withholdingOperationType,
-      withholding: doc.withholding, totals: doc.totals, notes: `Avoir sur facture ${inv.number}`, createdBy: userId, creditedInvoiceId: inv._id, creditReason: b.reason }] as never[], { session });
+      deliveryAddress: inv.deliveryAddress, paymentTerms: inv.paymentTerms, paymentTermsCustom: inv.paymentTermsCustom, withholding: doc.withholding, totals: doc.totals, notes: `Avoir sur facture ${inv.number}`, createdBy: userId, creditedInvoiceId: inv._id, creditReason: b.reason }] as never[], { session });
     return toDto(c!.toObject() as Lean);
   });
 }
@@ -224,9 +242,16 @@ export async function validate(companyId: Id, userId: Id, id: string) {
       const input: DocInput = { customerId: inv.customerId, lines: linesToInput(inv.lines, false, 'keep'), globalDiscountPct: inv.globalDiscountPct ?? 0, globalDiscountMinor: inv.globalDiscountMinor ?? 0, withholdingOperationType: inv.withholdingOperationType };
       const built = await buildDocument(companyId, 'invoice', input, { date: issueDate, session });
       built.lines.forEach((l, i) => { l.deliveredQty = inv.lines[i]!.deliveredQty ?? 0; });
-      doc = built;
+      // Brouillon antérieur aux adresses multiples : l'adresse de livraison qu'il portait est conservée
+      const legacy = inv.deliveryAddress === undefined ? (inv.customerSnapshot as { shippingAddress?: unknown }).shippingAddress : undefined;
+      doc = { ...built, customerSnapshot: { ...built.customerSnapshot, ...(legacy ? { shippingAddress: legacy } : {}) } };
     }
     const payable = doc.totals.totalPayableMinor;
+
+    // Conditions libres : les échéances sont fixées par l'utilisateur, aucune date n'est déduite du texte ni inventée
+    if (!isCredit && payable > 0 && inv.paymentTermsCustom && !inv.schedule.length) {
+      throw new AppError(409, 'Conditions de paiement personnalisées : saisissez l’échéancier réel de la facture avant de la valider', 'PAYMENT_SCHEDULE_REQUIRED');
+    }
 
     if (!isCredit) {
       await assertCanSell(companyId, inv.customerId, payable, session); // module 01 : limite de crédit / client archivé

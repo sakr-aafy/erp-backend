@@ -8,7 +8,8 @@ import { ensureCounter, nextDocumentNumber } from '../../services/numbering.serv
 import { startOfDay } from '../../services/fiscal.service.js';
 import { defaultWarehouseId, ensureLevels } from '../../services/stock.service.js';
 import { assertCanSell } from '../customers/customer.service.js';
-import { buildDocument, linesToInput, type LineInput } from '../sales/document.builder.js';
+import { buildDocument, inheritFrom, linesToInput, type LineInput } from '../sales/document.builder.js';
+import { snapshotDto } from '../parties/delivery-address.js';
 import { rangeFilter } from '../sales/document.http.js';
 
 type Id = Types.ObjectId;
@@ -17,7 +18,7 @@ type SourceType = 'quotation' | 'proforma' | 'invoice';
 const model = { quotation: Quotation, proforma: Proforma, invoice: Invoice } as const;
 
 export const toDto = (d: Lean) => ({
-  id: d._id.toString(), number: d.number, status: d.status, customerId: d.customerId.toString(), customer: d.customerSnapshot, deliveryDate: d.deliveryDate, carrier: d.carrier ?? null,
+  id: d._id.toString(), deliveryAddress: snapshotDto(d.deliveryAddress as never), number: d.number, status: d.status, customerId: d.customerId.toString(), customer: d.customerSnapshot, deliveryDate: d.deliveryDate, carrier: d.carrier ?? null,
   source: d.source?.type ? { type: d.source.type, id: d.source.id?.toString(), number: d.source.number ?? null } : null,
   lines: d.lines.map((l) => ({ ...l, id: (l as { _id: Id })._id.toString() })), totals: d.totals, notes: d.notes ?? null, invoiceId: d.invoiceId?.toString() ?? null, invoiced: !!d.invoiceId,
   warehouseId: d.warehouseId?.toString() ?? null, validatedAt: d.validatedAt ?? null, cancelledAt: d.cancelledAt ?? null, cancelReason: d.cancelReason ?? null, createdAt: d.createdAt,
@@ -26,7 +27,7 @@ export const toDto = (d: Lean) => ({
 
 async function loadSource(companyId: Id, type: SourceType, id: string, session?: ClientSession) {
   const doc = await (model[type] as typeof Quotation).findOne({ _id: id, companyId }).session(session ?? null).lean() as unknown as
-    { _id: Id; number?: string; status: string; customerId: Id; lines: { _id: Id; designation: string; kind?: string; quantity: number; deliveredQty?: number; unitPriceMinor: number }[]; invoiceId?: Id; proformaId?: Id; type?: string } | null;
+    { _id: Id; number?: string; status: string; customerId: Id; lines: { _id: Id; designation: string; kind?: string; quantity: number; deliveredQty?: number; unitPriceMinor: number }[]; invoiceId?: Id; proformaId?: Id; type?: string; deliveryAddress?: unknown } | null;
   if (!doc) throw AppError.notFound('Document source introuvable');
   if (type === 'quotation') {
     if (doc.status !== 'accepted') throw AppError.conflict('Seul un devis accepté peut donner lieu à une livraison');
@@ -43,6 +44,8 @@ export async function sourceLines(companyId: Id, type: SourceType, id: string) {
   const { Product } = await import('../../models/product.model.js');
   const prods = await Product.find({ companyId, _id: { $in: src.lines.map((l) => (l as { productId?: Id }).productId).filter(Boolean) } }).select('hasSerial').lean(); const serial = new Set(prods.filter((p) => p.hasSerial).map((p) => p._id.toString()));
   return { sourceNumber: src.number ?? null, customerId: src.customerId.toString(),
+    // absent : document antérieur aux adresses multiples (l'adresse par défaut du client sera reprise)
+    ...(src.deliveryAddress !== undefined && { deliveryAddress: snapshotDto(src.deliveryAddress as never) }),
     lines: src.lines.filter((l) => l.kind !== 'service').map((l) => ({ sourceLineId: l._id.toString(), hasSerial: serial.has(String((l as { productId?: Id }).productId)), designation: l.designation, quantity: l.quantity, deliveredQty: l.deliveredQty ?? 0, remainingQty: Math.max(0, l.quantity - (l.deliveredQty ?? 0)) })) };
 }
 
@@ -63,13 +66,13 @@ export async function getOwn(companyId: Id, id: string, session?: ClientSession)
 }
 export const get = async (c: Id, id: string) => toDto(await getOwn(c, id));
 
-interface Body { customerId?: string | undefined; source?: { type: SourceType; id: string } | undefined; lines: LineInput[]; deliveryDate?: Date | undefined; carrier?: string | undefined; notes?: string | undefined }
+interface Body { deliveryAddressId?: string | null | undefined; customerId?: string | undefined; source?: { type: SourceType; id: string } | undefined; lines: LineInput[]; deliveryDate?: Date | undefined; carrier?: string | undefined; notes?: string | undefined }
 
 /** Prépare les lignes : depuis un document source (prix/TVA repris du source, quantité ≤ reste à livrer) ou saisie manuelle. */
 async function prepare(companyId: Id, b: Body, session: ClientSession, ignoreBl?: Id) {
   if (!b.source) {
     if (b.lines.some((l) => l.sourceLineId)) throw AppError.badRequest('sourceLineId sans document source');
-    return { customerId: b.customerId!, lines: b.lines, source: undefined as undefined | { type: SourceType; id: Id; number: string } };
+    return { customerId: b.customerId!, lines: b.lines, source: undefined as undefined | { type: SourceType; id: Id; number: string }, sourceAddress: undefined as unknown };
   }
   const src = await loadSource(companyId, b.source.type, b.source.id, session);
   const lines: LineInput[] = [];
@@ -82,7 +85,7 @@ async function prepare(companyId: Id, b: Body, session: ClientSession, ignoreBl?
     lines.push({ ...linesToInput([sl as never], false, 'self')[0]!, quantity: l.quantity, ...(l.serials?.length && { serials: l.serials }) });
   }
   void ignoreBl;
-  return { customerId: src.customerId.toString(), lines, source: { type: b.source.type, id: src._id, number: src.number ?? '' } };
+  return { customerId: src.customerId.toString(), lines, source: { type: b.source.type, id: src._id, number: src.number ?? '' }, sourceAddress: src.deliveryAddress };
 }
 
 export async function create(companyId: Id, userId: Id, b: Body) {
@@ -90,10 +93,10 @@ export async function create(companyId: Id, userId: Id, b: Body) {
   return withTransaction(async (session) => {
     const date = startOfDay(b.deliveryDate ?? new Date());
     const p = await prepare(companyId, b, session);
-    const doc = await buildDocument(companyId, 'deliveryNote', { customerId: p.customerId, lines: p.lines }, { date, session });
+    const doc = await buildDocument(companyId, 'deliveryNote', { customerId: p.customerId, lines: p.lines, deliveryAddressId: b.deliveryAddressId }, { date, session, inherit: { deliveryAddress: p.sourceAddress } });
     const number = await nextDocumentNumber(companyId, 'deliveryNote', session, date);
     const [c] = await DeliveryNote.create([{ companyId, number, customerId: doc.customer._id, customerSnapshot: doc.customerSnapshot, deliveryDate: date, carrier: b.carrier, lines: doc.lines, totals: doc.totals,
-      source: p.source, notes: b.notes, createdBy: userId }] as never[], { session });
+      source: p.source, deliveryAddress: doc.deliveryAddress, notes: b.notes, createdBy: userId }] as never[], { session });
     return toDto(c!.toObject() as Lean);
   });
 }
@@ -105,8 +108,9 @@ export async function update(companyId: Id, id: string, b: Body) {
     const date = startOfDay(b.deliveryDate ?? cur.deliveryDate);
     const body: Body = { ...b, ...(cur.source?.type && { source: { type: cur.source.type as SourceType, id: cur.source.id!.toString() } }) }; // la source ne change pas
     const p = await prepare(companyId, body, session);
-    const doc = await buildDocument(companyId, 'deliveryNote', { customerId: p.customerId, lines: p.lines }, { date, session });
-    const u = await DeliveryNote.findOneAndUpdate({ _id: id, companyId, status: 'draft' }, { $set: { customerId: doc.customer._id, customerSnapshot: doc.customerSnapshot, deliveryDate: date, carrier: b.carrier, lines: doc.lines, totals: doc.totals, notes: b.notes } }, { returnDocument: 'after', session }).lean();
+    const inherit = inheritFrom(cur, p.customerId);
+    const doc = await buildDocument(companyId, 'deliveryNote', { customerId: p.customerId, lines: p.lines, deliveryAddressId: b.deliveryAddressId }, { date, session, ...(inherit && { inherit }) });
+    const u = await DeliveryNote.findOneAndUpdate({ _id: id, companyId, status: 'draft' }, { $set: { deliveryAddress: doc.deliveryAddress, customerId: doc.customer._id, customerSnapshot: doc.customerSnapshot, deliveryDate: date, carrier: b.carrier, lines: doc.lines, totals: doc.totals, notes: b.notes } }, { returnDocument: 'after', session }).lean();
     if (!u) throw AppError.conflict('Le BL a changé entre-temps');
     return toDto(u as Lean);
   });

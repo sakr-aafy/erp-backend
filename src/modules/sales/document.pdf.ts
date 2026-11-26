@@ -6,7 +6,10 @@ const RS: Record<string, string> = {};
 
 /** Rend le PDF d'un document à partir de son DTO. Mentions obligatoires : « PROFORMA » sur la facture proforma. */
 export async function pdfOf(companyId: Types.ObjectId, kind: 'quotation' | 'proforma' | 'invoice' | 'deliveryNote', d: Any): Promise<Buffer> {
-  const common = { customer: d.customer, lines: d.lines, totals: d.totals ?? {}, notes: d.notes, terms: d.terms };
+  // Document antérieur aux adresses multiples : l'adresse de livraison copiée dans le client reste imprimée
+  const legacy = d.customer?.shippingAddress;
+  const deliveryAddress = d.deliveryAddress ?? (legacy && (legacy.street || legacy.city) ? legacy : undefined);
+  const common = { customer: d.customer, lines: d.lines, totals: d.totals ?? {}, notes: d.notes, terms: d.terms, paymentTerms: d.paymentTerms, deliveryAddress };
   switch (kind) {
     case 'quotation': return renderDocumentPdf(companyId, { ...common, title: 'DEVIS', number: d.number, date: d.issueDate, secondaryDateLabel: 'Valable jusqu’au', secondaryDate: d.validUntil });
     case 'proforma': return renderDocumentPdf(companyId, { ...common, title: 'FACTURE PROFORMA', mention: 'PROFORMA', number: d.number, date: d.issueDate, secondaryDateLabel: 'Valable jusqu’au', secondaryDate: d.validUntil });

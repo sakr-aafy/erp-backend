@@ -3,6 +3,7 @@ import { Product, ProductSerial } from '../models/product.model.js';
 import { CostHistory, StockLevel, StockMovement, Warehouse, type MovementDoc } from '../models/logistics.model.js';
 import { AppError } from '../utils/errors.js';
 import { proportion } from './calculation.service.js';
+import { realPurchaseMinor } from '../modules/products/purchase-price.js';
 
 type Id = Types.ObjectId;
 export type MovementReason = MovementDoc['reason'];
@@ -78,7 +79,9 @@ export async function applyMovement(inp: MovementInput): Promise<MovementResult>
     }
     const take = Math.min(inp.quantity, available);
     const takeValue = take <= 0 ? 0 : take >= qtyBefore - 1e-9 ? valueBefore : proportion(valueBefore, take, qtyBefore);
-    const fallback = roundInt((product.costPriceMinor ?? product.purchasePriceMinor ?? 0) * Math.max(0, inp.quantity - take));
+    // Sortie au-delà du stock (forcée) : valorisée au coût réel ; à défaut, au prix d'achat converti au taux RÉEL (jamais estimatif)
+    const missing = Math.max(0, inp.quantity - take);
+    const fallback = missing > 0 ? roundInt((product.costPriceMinor ?? await realPurchaseMinor(companyId, product, new Date(), session)) * missing) : 0;
     moveValue = takeValue + fallback; qtyAfter = qtyBefore - inp.quantity; valueAfter = valueBefore - takeValue;
   }
   const upd = await StockLevel.updateOne({ _id: level!._id, qty: qtyBefore, valueMinor: valueBefore }, { $set: { qty: qtyAfter, valueMinor: valueAfter } }, { session });

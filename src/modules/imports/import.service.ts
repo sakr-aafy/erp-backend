@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import type { ClientSession, QueryFilter, Types } from 'mongoose';
+import { needsDimensionReview } from '../products/product.pricing.js';
 import { CHARGE_TYPES, ExchangeRate, GoodsReceipt, ImportFile, Warehouse, type ImportFileDoc } from '../../models/logistics.model.js';
 import { Product } from '../../models/product.model.js';
 import { Setting } from '../../models/setting.model.js';
@@ -85,7 +86,7 @@ async function buildLines(companyId: Id, lines: z.infer<typeof lineBody>[]) {
     // Instantané des données douanières et logistiques à la date d'ajout : une modification ultérieure de l'article ne change jamais un dossier (clôturé ou non)
     return { productId: p._id, reference: p.reference, designation: p.name, quantity: l.quantity, unitPriceMinor: l.unitPriceMinor,
       customs: { supplierHsCode: c?.supplierHsCode, tnHsCode: c?.tnHsCode, ddPct: c?.ddPct, fodecPct: c?.fodecPct, rpdPct: c?.rpdPct, originCountry: c?.originCountry, provenanceCountry: c?.provenanceCountry, specialRegulation: c?.specialRegulation, vatRateCode: p.vatRateCode, capturedAt: new Date() },
-      packaging: { unitVolumeM3: pk?.volumeM3, unitNetWeightKg: pk?.netWeightKg, unitGrossWeightKg: pk?.grossWeightKg, packagingType: pk?.typeLabel ?? pk?.type, parcelCount: pk?.parcelCount } }; });
+      packaging: { unitVolumeM3: pk?.volumeM3, unitNetWeightKg: pk?.netWeightKg, unitGrossWeightKg: pk?.grossWeightKg, packagingType: pk?.typeLabel ?? pk?.type, parcelCount: needsDimensionReview(pk) ? pk?.parcelCount : undefined } }; });
 }
 export async function create(companyId: Id, userId: Id, b: z.infer<typeof createBody>) {
   const sup = await Supplier.findOne({ _id: b.supplierId, companyId }).lean();

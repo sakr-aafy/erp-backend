@@ -26,15 +26,15 @@ afterAll(async () => { await teardownDb(); });
 describe('fiche client — création, code, validation', () => {
   it('Société : code CL-00001 automatique, champs de la fiche enregistrés et normalisés', async () => {
     const r = await A.j.post('/customers', {
-      type: 'company', name: 'Société Exemple SARL', tradeName: 'Exemple', taxId: ' 1234567/a ', registryNumber: 'B0123452020', sector: 'Industrie',
+      type: 'company', name: 'Société Exemple SARL', tradeName: 'Exemple', taxId: ' 1234567/a ',
       address: { street: '12 rue de la Liberté', city: 'Tunis', postalCode: '1000', country: 'Tunisie' }, phone: '+216 71 000 000', secondaryPhone: '+216 98 000 000', email: 'contact@exemple.tn',
       website: 'https://exemple.tn', social: { facebook: 'https://facebook.com/exemple', linkedin: 'https://linkedin.com/company/exemple', instagram: 'https://instagram.com/exemple' }, mapsUrl: 'https://maps.google.com/?q=tunis',
       creditLimitMinor: 5_000_000, paymentTerms: '30 jours', paymentDelayDays: 30, paymentMethod: 'transfer', discountPct: 7.5, subjectToWithholding: true, stampExempt: false });
     expect(r.status).toBe(201);
-    expect(r.body).toMatchObject({ code: 'CL-00002', type: 'company', name: 'Société Exemple SARL', tradeName: 'Exemple', taxId: '1234567/A', registryNumber: 'B0123452020', sector: 'Industrie', status: 'active', statusLabel: 'Actif',
-      paymentMethod: 'transfer', discountPct: 7.5, creditLimitMinor: 5_000_000, subjectToWithholding: true, shippingSameAsBilling: true, canSell: true, isArchived: false });
+    expect(r.body).toMatchObject({ code: 'CL-00002', type: 'company', name: 'Société Exemple SARL', tradeName: 'Exemple', taxId: '1234567/A', status: 'active', statusLabel: 'Actif',
+      paymentMethod: 'transfer', discountPct: 7.5, creditLimitMinor: 5_000_000, subjectToWithholding: true, deliveryAddresses: [], canSell: true, isArchived: false });
     expect(r.body.social.linkedin).toBe('https://linkedin.com/company/exemple'); expect(r.body.mapsUrl).toContain('maps.google.com');
-    expect(r.body.shippingAddress.city).toBe('Tunis'); // identique à la facturation
+    expect(r.body).not.toHaveProperty('registryNumber'); expect(r.body).not.toHaveProperty('sector');
   });
 
   it('Passager : sans matricule fiscal ni coordonnées complètes', async () => {
@@ -125,22 +125,16 @@ describe('fiche client — contacts, adresses', () => {
     expect((await A.j.post(`/customers/${id}/contacts`, {})).status).toBe(422);
     expect((await A.j.post(`/customers/${id}/contacts`, { name: 'Contact', email: 'pas-un-email' })).status).toBe(422);
   });
-  it('adresses : livraison distincte, ou identique à la facturation (aucune copie à maintenir)', async () => {
-    const same = await A.j.put(`/customers/${id}`, { shippingSameAsBilling: false, shippingAddress: { street: 'Zone industrielle', city: 'Sfax', postalCode: '3000', country: 'Tunisie' } });
-    expect(same.body).toMatchObject({ shippingSameAsBilling: false }); expect(same.body.shippingAddress.city).toBe('Sfax'); expect(same.body.address.city).toBe('Tunis');
-    const back = await A.j.put(`/customers/${id}`, { shippingSameAsBilling: true });
-    expect(back.body.shippingSameAsBilling).toBe(true); expect(back.body.shippingAddress.city).toBe('Tunis');
-    expect((await Customer.findById(id).lean())!.shippingAddress).toBeUndefined(); // pas de donnée périmée en base
-  });
-  it('un nouveau document commercial embarque l’adresse de livraison du client ; les documents validés ne changent plus', async () => {
-    await A.j.put(`/customers/${id}`, { shippingSameAsBilling: false, shippingAddress: { street: 'Dépôt', city: 'Sousse', country: 'Tunisie' } });
+  it('un nouveau document commercial copie l’adresse de livraison par défaut ; la modification du référentiel ne le réécrit pas', async () => {
+    const added = await A.j.post(`/customers/${id}/delivery-addresses`, { label: 'Dépôt', street: 'Route de la plage', city: 'Sousse', country: 'Tunisie' });
+    expect(added.status).toBe(201); const adr = added.body.deliveryAddresses[0].id as string;
     const q = await A.j.post('/quotations', quoteBody({ ...A, customerId: id } as Ctx, [line(A.products.a19)]));
     expect(q.status).toBe(201);
     const stored = await mongoose.connection.db!.collection('quotations').findOne({ _id: new mongoose.Types.ObjectId(q.body.id) });
-    expect(stored!.customerSnapshot.shippingAddress.city).toBe('Sousse'); expect(stored!.customerSnapshot.code).toBe('CL-00002');
-    await A.j.put(`/customers/${id}`, { shippingAddress: { street: 'Autre', city: 'Gabès', country: 'Tunisie' } });
+    expect(stored!.deliveryAddress.city).toBe('Sousse'); expect(stored!.customerSnapshot.code).toBe('CL-00002');
+    await A.j.put(`/customers/${id}/delivery-addresses/${adr}`, { city: 'Gabès' });
     const again = await mongoose.connection.db!.collection('quotations').findOne({ _id: new mongoose.Types.ObjectId(q.body.id) });
-    expect(again!.customerSnapshot.shippingAddress.city).toBe('Sousse'); // l'historique n'est jamais réécrit
+    expect(again!.deliveryAddress.city).toBe('Sousse'); // l'historique n'est jamais réécrit
   });
 });
 

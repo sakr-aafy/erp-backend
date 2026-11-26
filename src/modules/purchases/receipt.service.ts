@@ -10,17 +10,32 @@ import { ensureCounter, nextDocumentNumber } from '../../services/numbering.serv
 import { ensureLevels } from '../../services/stock.service.js';
 import { proportion } from '../../services/calculation.service.js';
 import { startOfDay } from '../../services/fiscal.service.js';
+import { Supplier } from '../../models/supplier.model.js';
+import { resolveAddress, type AddressSnapshot } from '../parties/delivery-address.js';
+import { addressesDto, receivingSnapshot } from './purchase.addresses.js';
 
 type Id = Types.ObjectId; type Lean = GoodsReceiptDoc & { _id: Id; createdAt?: Date };
 export const receiptBody = z.object({
+  /** Adresse du fournisseur : absente = celle de la commande ; null = aucune. */
+  supplierAddressId: objectId.nullable().optional(),
   purchaseOrderId: objectId, warehouseId: objectId, receiptDate: z.coerce.date().optional(), deliveryNoteRef: z.string().trim().max(60).optional(), notes: z.string().trim().max(1000).optional(),
   lines: z.array(z.object({ orderLineId: objectId, quantity: z.number().gt(0).max(1e9), serials: z.array(z.string().trim().min(1)).max(1000).optional() }).strict()).min(1).max(300),
 }).strict();
 type Body = z.infer<typeof receiptBody>;
 
-export const toDto = (r: Lean) => ({ id: r._id.toString(), number: r.number, status: r.status, purchaseOrderId: r.purchaseOrderId?.toString() ?? null, importFileId: r.importFileId?.toString() ?? null, supplier: r.supplier, warehouseId: r.warehouseId!.toString(),
+export const toDto = (r: Lean) => ({ ...addressesDto(r), id: r._id.toString(), number: r.number, status: r.status, purchaseOrderId: r.purchaseOrderId?.toString() ?? null, importFileId: r.importFileId?.toString() ?? null, supplier: r.supplier, warehouseId: r.warehouseId!.toString(),
   receiptDate: r.receiptDate, deliveryNoteRef: r.deliveryNoteRef ?? null, notes: r.notes ?? null, validatedAt: r.validatedAt ?? null, editable: r.status === 'draft' && !r.importFileId,
   lines: r.lines.map((l) => ({ id: (l as { _id: Id })._id.toString(), orderLineId: l.orderLineId?.toString() ?? null, productId: l.productId!.toString(), designation: l.designation ?? null, quantity: l.quantity, unitCostMinor: l.unitCostMinor ?? 0, extraUnitCostMinor: l.extraUnitCostMinor ?? 0, valueMinor: l.valueMinor ?? 0, serials: l.serials ?? [] })), createdAt: r.createdAt });
+
+/** Adresses copiées sur la réception : fournisseur (celle de la commande par défaut) et magasin de réception choisi. */
+async function receiptAddresses(companyId: Id, b: Body, supplierId: Id, inherited: unknown, session: ClientSession) {
+  const supplier = await Supplier.findOne({ _id: supplierId, companyId }).session(session).lean();
+  if (!supplier) throw AppError.badRequest('Fournisseur invalide');
+  return {
+    supplierAddress: resolveAddress(supplier, b.supplierAddressId, inherited as AddressSnapshot | null | undefined),
+    receivingAddress: await receivingSnapshot(companyId, b.warehouseId, session),
+  };
+}
 
 /** Préparation des lignes : quantité ≤ reste à recevoir ; valeur = part du net HT de la commande (reliquat sur la dernière fraction). */
 async function prepare(companyId: Id, b: Body, session: ClientSession) {
@@ -51,7 +66,8 @@ export async function create(companyId: Id, userId: Id, b: Body) {
   const date = startOfDay(b.receiptDate ?? new Date()); await ensureCounter(companyId, 'goodsReceipt', date);
   return withTransaction(async (session) => {
     const { po, lines } = await prepare(companyId, b, session); const number = await nextDocumentNumber(companyId, 'goodsReceipt', session, date);
-    const [r] = await GoodsReceipt.create([{ companyId, number, purchaseOrderId: po._id, supplierId: po.supplierId, supplier: po.supplier, warehouseId: b.warehouseId, receiptDate: date, lines, notes: b.notes, deliveryNoteRef: b.deliveryNoteRef, createdBy: userId }] as never[], { session });
+    const addresses = await receiptAddresses(companyId, b, po.supplierId, po.supplierAddress, session);
+    const [r] = await GoodsReceipt.create([{ ...addresses, companyId, number, purchaseOrderId: po._id, supplierId: po.supplierId, supplier: po.supplier, warehouseId: b.warehouseId, receiptDate: date, lines, notes: b.notes, deliveryNoteRef: b.deliveryNoteRef, createdBy: userId }] as never[], { session });
     return toDto(r!.toObject() as Lean);
   });
 }
@@ -59,7 +75,8 @@ export async function update(companyId: Id, id: string, b: Body) {
   return withTransaction(async (session) => {
     const cur = await getOwn(companyId, id, session); if (cur.status !== 'draft') throw AppError.conflict('Réception validée : non modifiable'); if (cur.importFileId) throw AppError.conflict('Réception d’importation : gérée par le dossier');
     const { lines } = await prepare(companyId, { ...b, purchaseOrderId: cur.purchaseOrderId!.toString() }, session);
-    const u = await GoodsReceipt.findOneAndUpdate({ _id: id, companyId, status: 'draft' }, { $set: { warehouseId: b.warehouseId, receiptDate: startOfDay(b.receiptDate ?? cur.receiptDate), lines, notes: b.notes, deliveryNoteRef: b.deliveryNoteRef } }, { returnDocument: 'after', session }).lean();
+    const addresses = await receiptAddresses(companyId, b, cur.supplierId, cur.supplierAddress, session);
+    const u = await GoodsReceipt.findOneAndUpdate({ _id: id, companyId, status: 'draft' }, { $set: { ...addresses, warehouseId: b.warehouseId, receiptDate: startOfDay(b.receiptDate ?? cur.receiptDate), lines, notes: b.notes, deliveryNoteRef: b.deliveryNoteRef } }, { returnDocument: 'after', session }).lean();
     if (!u) throw AppError.conflict('La réception a changé entre-temps'); return toDto(u as Lean);
   });
 }

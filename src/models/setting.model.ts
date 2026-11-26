@@ -1,4 +1,5 @@
 import { Schema, model, type InferSchemaType } from 'mongoose';
+import { DEFAULT_ESTIMATE_RATES } from '../modules/products/estimate-rate.js';
 
 /**
  * Paramètres par société. Les règles fiscales (TVA, retenue, timbre) sont dans FiscalRule (historisées, avec date d'effet).
@@ -15,6 +16,13 @@ const numberingSchema = new Schema(
   { _id: false },
 );
 
+/** Taux de change ESTIMATIF (fiche article uniquement) : distinct des taux réels de la collection ExchangeRate. */
+const estimateRateSchema = new Schema(
+  { currency: { type: String, required: true, uppercase: true }, targetCurrency: { type: String, required: true, uppercase: true }, rate: { type: Number, required: true, min: 0 },
+    updatedAt: { type: Date }, updatedBy: { type: Schema.Types.ObjectId, ref: 'User' } },
+  { _id: false },
+);
+
 const settingSchema = new Schema(
   {
     companyId: { type: Schema.Types.ObjectId, ref: 'Company', required: true, unique: true },
@@ -22,6 +30,7 @@ const settingSchema = new Schema(
     currencies: { type: [currencySchema], default: [{ code: 'TND', name: 'Dinar tunisien', symbol: 'DT', decimals: 3 }] },
     numbering: { type: [numberingSchema], default: [] },
     supplierBlockThresholdMinor: { type: Number },
+    estimateRates: { type: [estimateRateSchema], default: () => DEFAULT_ESTIMATE_RATES.map((r) => ({ ...r })) },
   },
   { timestamps: true },
 );

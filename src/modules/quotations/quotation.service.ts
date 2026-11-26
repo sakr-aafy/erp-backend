@@ -5,7 +5,8 @@ import { buildSort, escapeRegex } from '../../utils/pagination.js';
 import { withTransaction } from '../../utils/transaction.js';
 import { ensureCounter, nextDocumentNumber } from '../../services/numbering.service.js';
 import { startOfDay } from '../../services/fiscal.service.js';
-import { buildDocument, linesToInput, type DocInput } from '../sales/document.builder.js';
+import { buildDocument, frozenOf, inheritFrom, linesToInput, stillActiveAddress, type DocInput } from '../sales/document.builder.js';
+import { snapshotDto } from '../parties/delivery-address.js';
 import { rangeFilter } from '../sales/document.http.js';
 import * as invoices from '../invoices/invoice.service.js';
 
@@ -15,7 +16,7 @@ type Lean = QuotationDoc & { _id: Id; createdAt?: Date };
 export const toDto = (q: Lean) => ({
   id: q._id.toString(), number: q.number, status: q.status, customerId: q.customerId.toString(), customer: q.customerSnapshot, issueDate: q.issueDate, validUntil: q.validUntil,
   lines: q.lines.map((l) => ({ ...l, id: (l as { _id: Id })._id.toString(), vat: l.vat })), globalDiscountPct: q.globalDiscountPct, globalDiscountMinor: q.globalDiscountMinor,
-  withholdingOperationType: q.withholdingOperationType ?? null, totals: q.totals, notes: q.notes ?? null, terms: q.terms ?? null,
+  withholdingOperationType: q.withholdingOperationType ?? null, totals: q.totals, notes: q.notes ?? null, terms: q.terms ?? null, paymentTerms: q.paymentTerms ?? null, paymentTermsCustom: !!q.paymentTermsCustom, deliveryAddress: snapshotDto(q.deliveryAddress as never),
   proformaId: q.proformaId?.toString() ?? null, invoiceId: q.invoiceId?.toString() ?? null, sentAt: q.sentAt ?? null, createdAt: q.createdAt,
   editable: q.status === 'pending' && !q.proformaId && !q.invoiceId,
 });
@@ -55,7 +56,7 @@ export async function create(companyId: Id, userId: Id, b: Body) {
     const number = await nextDocumentNumber(companyId, 'quotation', session, issueDate);
     const [created] = await Quotation.create([{ companyId, number, customerId: doc.customer._id, customerSnapshot: doc.customerSnapshot, issueDate, validUntil: startOfDay(b.validUntil),
       lines: doc.lines, globalDiscountPct: doc.globalDiscountPct, globalDiscountMinor: doc.globalDiscountMinor, withholdingOperationType: doc.withholdingOperationType,
-      withholding: doc.withholding, stamp: doc.stamp, totals: doc.totals, notes: b.notes, terms: b.terms, createdBy: userId }] as never[], { session });
+      withholding: doc.withholding, stamp: doc.stamp, totals: doc.totals, notes: b.notes, terms: b.terms, ...frozenOf(doc), createdBy: userId }] as never[], { session });
     return created!;
   });
   return toDto(q.toObject() as Lean);
@@ -66,10 +67,11 @@ export async function update(companyId: Id, id: string, b: Body) {
   const dto = toDto(cur); if (!dto.editable) throw AppError.conflict('Seul un devis en attente et non converti est modifiable');
   const issueDate = startOfDay(b.issueDate ?? cur.issueDate);
   return withTransaction(async (session) => {
-    const doc = await buildDocument(companyId, 'quotation', b, { date: issueDate, session });
+    const inherit = inheritFrom(cur, b.customerId);
+    const doc = await buildDocument(companyId, 'quotation', b, { date: issueDate, session, ...(inherit && { inherit }) });
     const u = await Quotation.findOneAndUpdate({ _id: id, companyId, status: 'pending', proformaId: null, invoiceId: null }, { $set: { customerId: doc.customer._id, customerSnapshot: doc.customerSnapshot, issueDate, validUntil: startOfDay(b.validUntil),
       lines: doc.lines, globalDiscountPct: doc.globalDiscountPct, globalDiscountMinor: doc.globalDiscountMinor, withholdingOperationType: doc.withholdingOperationType ?? null,
-      withholding: doc.withholding ?? null, stamp: doc.stamp ?? null, totals: doc.totals, notes: b.notes, terms: b.terms } }, { returnDocument: 'after', session }).lean();
+      withholding: doc.withholding ?? null, stamp: doc.stamp ?? null, totals: doc.totals, notes: b.notes, terms: b.terms, ...frozenOf(doc) } }, { returnDocument: 'after', session }).lean();
     if (!u) throw AppError.conflict('Le devis a changé entre-temps');
     return toDto(u as Lean);
   });
@@ -97,7 +99,8 @@ export async function duplicate(companyId: Id, userId: Id, id: string) {
   const src = await getOwn(companyId, id);
   const days = Math.max(1, Math.round((src.validUntil.getTime() - src.issueDate.getTime()) / 86400000));
   const today = startOfDay(new Date());
-  return create(companyId, userId, { customerId: src.customerId, lines: linesToInput(src.lines), globalDiscountPct: src.globalDiscountPct ?? 0, globalDiscountMinor: src.globalDiscountMinor ?? 0,
+  const deliveryAddressId = await stillActiveAddress(companyId, src.customerId, src.deliveryAddress as never);
+  return create(companyId, userId, { customerId: src.customerId, deliveryAddressId, ...(src.paymentTerms !== undefined && { paymentTerms: src.paymentTerms, paymentTermsCustom: !!src.paymentTermsCustom }), lines: linesToInput(src.lines), globalDiscountPct: src.globalDiscountPct ?? 0, globalDiscountMinor: src.globalDiscountMinor ?? 0,
     withholdingOperationType: src.withholdingOperationType ?? undefined, issueDate: today, validUntil: new Date(today.getTime() + days * 86400000), notes: src.notes ?? undefined, terms: src.terms ?? undefined });
 }
 
@@ -116,11 +119,11 @@ export async function convertToProforma(companyId: Id, userId: Id, id: string, v
     if (await DeliveryNote.exists({ companyId, 'source.id': q._id }).session(session)) throw AppError.conflict('Des bons de livraison existent pour ce devis : facturez-les');
     const today = startOfDay(new Date());
     const days = Math.max(1, Math.round((q.validUntil.getTime() - q.issueDate.getTime()) / 86400000));
-    const doc = await buildDocument(companyId, 'proforma', { customerId: q.customerId, lines: linesToInput(q.lines), globalDiscountPct: q.globalDiscountPct ?? 0, globalDiscountMinor: q.globalDiscountMinor ?? 0, withholdingOperationType: q.withholdingOperationType }, { date: today, session });
+    const doc = await buildDocument(companyId, 'proforma', { customerId: q.customerId, lines: linesToInput(q.lines), globalDiscountPct: q.globalDiscountPct ?? 0, globalDiscountMinor: q.globalDiscountMinor ?? 0, withholdingOperationType: q.withholdingOperationType }, { date: today, session, inherit: inheritFrom(q, q.customerId)! });
     const number = await nextDocumentNumber(companyId, 'proforma', session, today);
     const [p] = await Proforma.create([{ companyId, number, customerId: doc.customer._id, customerSnapshot: doc.customerSnapshot, issueDate: today, validUntil: validUntil ? startOfDay(validUntil) : new Date(today.getTime() + days * 86400000),
       lines: doc.lines, globalDiscountPct: doc.globalDiscountPct, globalDiscountMinor: doc.globalDiscountMinor, withholdingOperationType: doc.withholdingOperationType, withholding: doc.withholding, stamp: doc.stamp,
-      totals: doc.totals, quotationId: q._id, notes: q.notes, terms: q.terms, createdBy: userId }] as never[], { session });
+      totals: doc.totals, quotationId: q._id, notes: q.notes, terms: q.terms, ...frozenOf(doc), createdBy: userId }] as never[], { session });
     await Quotation.updateOne({ _id: q._id }, { status: 'accepted', acceptedAt: q.status === 'accepted' ? undefined : new Date(), proformaId: p!._id }, { session });
     return { proformaId: p!._id.toString(), number };
   });
@@ -134,7 +137,7 @@ export async function convertToInvoice(companyId: Id, userId: Id, id: string) {
     assertConvertible(q);
     if (await DeliveryNote.exists({ companyId, 'source.id': q._id }).session(session)) throw AppError.conflict('Des bons de livraison existent pour ce devis : facturez-les');
     const inv = await invoices.createDraft(companyId, userId, { customerId: q.customerId, lines: linesToInput(q.lines), globalDiscountPct: q.globalDiscountPct ?? 0, globalDiscountMinor: q.globalDiscountMinor ?? 0,
-      withholdingOperationType: q.withholdingOperationType ?? undefined, notes: q.notes ?? undefined }, { quotationId: q._id }, session);
+      withholdingOperationType: q.withholdingOperationType ?? undefined, notes: q.notes ?? undefined }, { quotationId: q._id, inherit: inheritFrom(q, q.customerId) }, session);
     await Quotation.updateOne({ _id: q._id }, { status: 'accepted', ...(q.status === 'pending' && { acceptedAt: new Date() }), invoiceId: new Types.ObjectId(inv.id) }, { session });
     return { invoiceId: inv.id };
   });

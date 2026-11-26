@@ -6,7 +6,7 @@ import { lineBody } from '../sales/document.builder.js';
 export const deliveryBody = z.object({
   customerId: objectId.optional(), source: z.object({ type: z.enum(['quotation', 'proforma', 'invoice']), id: objectId }).strict().optional(),
   lines: z.array(lineBody).min(1, 'Au moins une ligne').max(500), deliveryDate: z.coerce.date().optional(),
-  carrier: z.string().trim().max(120).optional(), notes: z.string().trim().max(2000).optional(),
+  carrier: z.string().trim().max(120).optional(), deliveryAddressId: objectId.nullable().optional(), notes: z.string().trim().max(2000).optional(),
 }).strict().superRefine((v, ctx) => {
   if (!v.source && !v.customerId) ctx.addIssue({ code: 'custom', path: ['customerId'], message: 'Client requis (ou document source)' });
   if (v.source && v.lines.some((l) => !l.sourceLineId)) ctx.addIssue({ code: 'custom', path: ['lines'], message: 'Chaque ligne doit référencer une ligne du document source' });

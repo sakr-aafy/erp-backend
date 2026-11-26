@@ -7,6 +7,7 @@ import { Product } from '../../models/product.model.js';
 import { AppError } from '../../utils/errors.js';
 import { objectId } from '../../utils/pagination.js';
 import { minorInt } from '../parties/party.shared.js';
+import { addressesOf, resolveAddress, type AddressSnapshot } from '../parties/delivery-address.js';
 import { CalculationError, computeDocument, type CalcInput, type CalcLine, type DocTotals, type VatRegime } from '../../services/calculation.service.js';
 import { resolveStamp, resolveVat, resolveWithholding, type VatSnapshot } from '../../services/fiscal.service.js';
 
@@ -31,9 +32,16 @@ export const docFields = {
   withholdingOperationType: z.string().trim().max(30).optional(), notes: z.string().trim().max(2000).optional(),
   /** Dérogation aux règles de prix de l'article (prix minimum, remise maximale) : motif obligatoire, permission products:validate, audité. */
   priceOverrideReason: z.string().trim().min(3).max(300).optional(),
+  /** Adresse de livraison enregistrée chez le client ; null = aucune ; absent = copie existante ou adresse par défaut. */
+  deliveryAddressId: objectId.nullable().optional(),
 };
+/** Conditions de paiement (devis, proforma, facture) : absentes = copie existante ou celles du client. */
+export const paymentTermsDocFields = { paymentTerms: z.string().trim().max(500).nullable().optional(), paymentTermsCustom: z.boolean().optional() };
 export type LineInput = z.infer<typeof lineBody> & { vat?: VatSnapshot };
-export interface DocInput { customerId: string | Id; lines: LineInput[]; globalDiscountPct?: number; globalDiscountMinor?: number; withholdingOperationType?: string | null | undefined }
+export interface PaymentTerms { paymentTerms?: string | null | undefined; paymentTermsCustom?: boolean | null | undefined }
+export interface DocInput extends PaymentTerms { customerId: string | Id; lines: LineInput[]; globalDiscountPct?: number; globalDiscountMinor?: number; withholdingOperationType?: string | null | undefined; deliveryAddressId?: string | null | undefined }
+/** Valeurs déjà figées sur le document (modification) ou sur le document source (conversion). */
+export interface Inherited extends PaymentTerms { deliveryAddress?: unknown }
 
 export interface BuiltLine {
   productId?: Id; reference?: string | undefined; designation: string; description?: string | undefined; unit?: string | undefined; kind: 'product' | 'service';
@@ -46,6 +54,18 @@ export interface BuiltDocument {
   lines: BuiltLine[]; globalDiscountPct: number; globalDiscountMinor: number; withholdingOperationType?: string | undefined;
   withholding?: { ruleId: Id; code: string; ratePct: number; base: 'ht' | 'ttc'; amountMinor: number } | undefined;
   stamp?: { ruleId: Id; code: string; amountMinor: number } | undefined; totals: DocTotals;
+  deliveryAddress: AddressSnapshot | null; paymentTerms: string | null; paymentTermsCustom: boolean;
+}
+
+/** « Comptant » ou « N jours » : conditions que le délai de paiement suffit à traduire en échéance. */
+const STANDARD_TERMS = /^(comptant|\d{1,3}\s*jours?)$/i;
+export function resolveTerms(customer: PaymentTerms, input: PaymentTerms, current?: PaymentTerms): { paymentTerms: string | null; paymentTermsCustom: boolean } {
+  const of = (x: PaymentTerms) => ({ paymentTerms: x.paymentTerms || null, paymentTermsCustom: !!x.paymentTerms && !!x.paymentTermsCustom });
+  if (input.paymentTerms === undefined) return of(current ?? customer);
+  const text = input.paymentTerms || null;
+  const inherited = [current, customer].find((x) => x?.paymentTerms === text);
+  // Le texte libre n'est jamais interprété : il est seulement classé (standard ou personnalisé)
+  return of({ paymentTerms: text, paymentTermsCustom: input.paymentTermsCustom ?? (inherited ? inherited.paymentTermsCustom : !STANDARD_TERMS.test(text ?? '')) });
 }
 
 /**
@@ -53,7 +73,7 @@ export interface BuiltDocument {
  * totaux calculés par le service de calcul unique, puis retenue à la source et timbre si leurs règles validées s'appliquent.
  * Le serveur ne fait confiance à AUCUN montant calculé par le client.
  */
-export async function buildDocument(companyId: Id, docType: DocType, input: DocInput, opts: { date: Date; session?: ClientSession; allowArchivedCustomer?: boolean }): Promise<BuiltDocument> {
+export async function buildDocument(companyId: Id, docType: DocType, input: DocInput, opts: { date: Date; session?: ClientSession; allowArchivedCustomer?: boolean; inherit?: Inherited }): Promise<BuiltDocument> {
   const { date, session } = opts;
   const customer = await Customer.findOne({ _id: input.customerId, companyId }).session(session ?? null).lean();
   if (!customer) throw AppError.badRequest('Client invalide');
@@ -102,11 +122,25 @@ export async function buildDocument(companyId: Id, docType: DocType, input: DocI
   result.lines.forEach((r, i) => Object.assign(built[i]!, r));
   return {
     customer: { _id: customer._id, name: customer.name, taxId: customer.taxId, address: customer.address, paymentDelayDays: customer.paymentDelayDays },
-    customerSnapshot: { name: customer.name, ...(customer.code && { code: customer.code }), ...(customer.taxId && { taxId: customer.taxId }), address: customer.address,
-      ...(customer.shippingSameAsBilling === false && customer.shippingAddress ? { shippingAddress: customer.shippingAddress } : {}) },
+    customerSnapshot: { name: customer.name, ...(customer.code && { code: customer.code }), ...(customer.taxId && { taxId: customer.taxId }), address: customer.address },
+    deliveryAddress: resolveAddress(customer, input.deliveryAddressId, opts.inherit?.deliveryAddress as AddressSnapshot | null | undefined),
+    ...resolveTerms(customer, input, opts.inherit && opts.inherit.paymentTerms !== undefined ? opts.inherit : undefined),
     lines: built, globalDiscountPct: input.globalDiscountPct ?? 0, globalDiscountMinor: input.globalDiscountMinor ?? 0,
     ...(input.withholdingOperationType && { withholdingOperationType: input.withholdingOperationType }), withholding, stamp, totals: result.totals,
   };
+}
+
+type Frozen = PaymentTerms & { customerId: unknown; deliveryAddress?: unknown };
+/** Adresse et conditions figées d'un document, à conserver tant que le client reste le même. */
+export const inheritFrom = (d: Frozen, customerId: unknown): Inherited | undefined => (String(d.customerId) === String(customerId)
+  ? { deliveryAddress: d.deliveryAddress, paymentTerms: d.paymentTerms, paymentTermsCustom: d.paymentTermsCustom } : undefined);
+/** Champs à enregistrer sur un devis, une proforma ou une facture. */
+export const frozenOf = (d: BuiltDocument) => ({ deliveryAddress: d.deliveryAddress, paymentTerms: d.paymentTerms, paymentTermsCustom: d.paymentTermsCustom });
+/** Duplication : l'adresse du document source n'est reprise que si elle est toujours active chez le client (sinon adresse par défaut). */
+export async function stillActiveAddress(companyId: Id, customerId: Id, s: AddressSnapshot | null | undefined): Promise<string | null | undefined> {
+  if (!s) return s;
+  const c = await Customer.findOne({ _id: customerId, companyId }).lean();
+  return c && addressesOf(c).some((a) => !a.archivedAt && a._id.toString() === s.addressId?.toString()) ? s.addressId!.toString() : undefined;
 }
 
 /** Convertit les lignes enregistrées d'un document en entrées de calcul (conversion devis → facture, etc.). `keepVat` conserve la TVA d'origine ; `withSource` gère la traçabilité des lignes. */
@@ -122,6 +156,8 @@ export const linesToInput = (lines: { productId?: Id | null; designation: string
 
 /** Aperçu des totaux sans enregistrement (formulaires) : même moteur que l'enregistrement. */
 export async function previewTotals(companyId: Id, docType: DocType, input: DocInput, date: Date) {
-  const b = await buildDocument(companyId, docType, input, { date, allowArchivedCustomer: true });
+  // L'aperçu ne porte que sur les montants : adresse et conditions sont ignorées
+  const { deliveryAddressId: _a, ...amounts } = input;
+  const b = await buildDocument(companyId, docType, amounts, { date, allowArchivedCustomer: true });
   return { lines: b.lines.map((l) => ({ grossMinor: l.grossMinor, discountMinor: l.discountMinor, netHtMinor: l.netHtMinor, vat: l.vat })), totals: b.totals, withholding: b.withholding ?? null, stamp: b.stamp ?? null };
 }

@@ -182,7 +182,7 @@ describe('articles : import / export Excel et CSV', () => {
     const back = await imp(A.token, ex.body as Buffer, 'export.xlsx', '?mode=upsert');
     expect(back.body.errors).toEqual([]); expect(back.body.toUpdate).toBe(await Product.countDocuments({ companyId: A.companyId }));
     const csvEx = await get(A.token, '/products/export?format=csv').buffer().parse(binaryParser);
-    expect((csvEx.body as Buffer).toString('utf8')).toContain('Code article;Désignation;Marque');
+    expect((csvEx.body as Buffer).toString('utf8')).toContain('Code article;Désignation;Type');
     expect((await get(A.token, '/products/export?format=pdf').buffer().parse(binaryParser)).body.subarray(0, 4).toString()).toBe('%PDF');
   });
   it('rejette les fichiers non supportés, falsifiés ou absents ; permissions : create requis, update pour upsert', async () => {

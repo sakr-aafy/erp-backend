@@ -22,6 +22,8 @@ export const DEFAULT_SERIES: Record<string, { prefix: string; padding: number; i
   reconciliation: { prefix: 'RAP-', padding: 6, includeYear: true, resetYearly: true },
   // Code client : continu, sans année (CL-00001)
   customer: { prefix: 'CL-', padding: 5, includeYear: false, resetYearly: false },
+  // Code fournisseur : continu, sans année (FR-00001)
+  supplier: { prefix: 'FR-', padding: 5, includeYear: false, resetYearly: false },
   // Journaux comptables : numérotation continue par journal (sans remise à zéro)
   journal_sales: { prefix: 'VTE-', padding: 6, includeYear: false, resetYearly: false },
   journal_purchases: { prefix: 'ACH-', padding: 6, includeYear: false, resetYearly: false },
@@ -31,7 +33,7 @@ export const DEFAULT_SERIES: Record<string, { prefix: string; padding: number; i
 
 async function counterKey(companyId: Types.ObjectId, docType: string, date: Date) {
   const settings = await Setting.findOne({ companyId }).lean();
-  const fmt = settings?.numbering.find((n) => n.docType === docType) ?? DEFAULT_SERIES[docType];
+  const fmt = settings?.numbering?.find((n) => n.docType === docType) ?? DEFAULT_SERIES[docType];
   if (!fmt) throw AppError.badRequest(`Format de numérotation non configuré pour « ${docType} »`);
   return { fmt, key: fmt.resetYearly ? `${docType}:${date.getUTCFullYear()}` : docType };
 }

@@ -16,7 +16,8 @@ export async function salesCompany(name: string, email: string) {
   const unitId = (await j.post('/product-units', { code: 'PCE', name: 'Pièce' })).body.id as string;
   const mk = async (reference: string, vatRateCode: string, salePriceMinor: number, kind = 'product') => (await j.post('/products', { reference, name: `Article ${reference}`, unitId, vatRateCode, purchasePriceMinor: 1000, salePriceMinor, kind })).body.id as string;
   const products = { a19: await mk('A19', 'T19', 100_000), b13: await mk('B13', 'T13', 50_000), c7: await mk('C7', 'T7', 20_000), svc: await mk('SRV', 'T19', 80_000, 'service') };
-  const customerId = (await j.post('/customers', { name: 'Client Test', taxId: 'CT-1', email: 'client@test.tn', paymentDelayDays: 30 })).body.id as string;
+  // Non assujetti : les scénarios fiscaux activent explicitement la retenue (le défaut d’un nouveau client est « assujetti »)
+  const customerId = (await j.post('/customers', { name: 'Client Test', taxId: 'CT-1', email: 'client@test.tn', paymentDelayDays: 30, subjectToWithholding: false })).body.id as string;
   return { ...c, j, unitId, products, customerId };
 }
 export const line = (productId: string, quantity = 1, extra: object = {}) => ({ productId, quantity, ...extra });

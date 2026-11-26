@@ -3,11 +3,11 @@ import { PAYMENT_METHODS } from '../../models/sales.model.js';
 import { minorInt } from '../parties/party.shared.js';
 import { objectId } from '../../utils/pagination.js';
 import { baseListQuery, boolQuery } from '../sales/document.http.js';
-import { docFields } from '../sales/document.builder.js';
+import { docFields, paymentTermsDocFields } from '../sales/document.builder.js';
 
 const schedule = z.array(z.object({ dueDate: z.coerce.date(), percent: z.number().gt(0).max(100) }).strict()).max(24)
   .refine((s) => !s.length || Math.abs(s.reduce((a, b) => a + b.percent, 0) - 100) < 0.001, 'Le total des échéances doit faire 100 %');
-export const invoiceBody = z.object({ ...docFields, issueDate: z.coerce.date().optional(), paymentMethod: z.enum(PAYMENT_METHODS).optional(), schedule: schedule.optional() }).strict();
+export const invoiceBody = z.object({ ...docFields, ...paymentTermsDocFields, issueDate: z.coerce.date().optional(), paymentMethod: z.enum(PAYMENT_METHODS).optional(), schedule: schedule.optional() }).strict();
 export const fromDeliveryNotesBody = z.object({ deliveryNoteIds: z.array(objectId).min(1).max(50), issueDate: z.coerce.date().optional() }).strict();
 export const creditNoteBody = z.object({
   reason: z.string().trim().min(3).max(300),

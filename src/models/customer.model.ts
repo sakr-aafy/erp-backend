@@ -1,5 +1,6 @@
 import { Schema, model, type InferSchemaType } from 'mongoose';
 import { addressSchema, contactSchema } from '../modules/parties/party.shared.js';
+import { deliveryAddressSchema } from '../modules/parties/delivery-address.js';
 
 export const CUSTOMER_TYPES = ['company', 'walk_in'] as const;
 export const CUSTOMER_STATUSES = ['active', 'inactive', 'archived', 'blocked'] as const;
@@ -15,12 +16,18 @@ const customerSchema = new Schema(
     name: { type: String, required: true, trim: true },
     tradeName: { type: String, trim: true },
     taxId: { type: String, trim: true },
+    /** Champs OBSOLÈTES (retirés des écrans et de l'API) : valeurs historiques conservées, jamais réécrites. */
     registryNumber: { type: String, trim: true },
     sector: { type: String, trim: true },
     /** Adresse de facturation. */
     address: { type: addressSchema, default: () => ({}) },
+    /** Adresses de livraison (une seule par défaut). */
+    deliveryAddresses: { type: [deliveryAddressSchema], default: [] },
+    /** Ancienne adresse de livraison unique : conservée après migration vers `deliveryAddresses`, plus modifiée. */
     shippingAddress: { type: addressSchema },
-    shippingSameAsBilling: { type: Boolean, default: true },
+    shippingSameAsBilling: { type: Boolean },
+    /** Saisies d'origine des téléphones reformatés par la migration (réversibilité). */
+    phoneOriginals: { type: Schema.Types.Mixed },
     phone: { type: String, trim: true },
     secondaryPhone: { type: String, trim: true },
     website: { type: String, trim: true },
@@ -36,13 +43,16 @@ const customerSchema = new Schema(
     email: { type: String, trim: true, lowercase: true },
     contacts: { type: [contactSchema], default: [] },
     paymentTerms: { type: String, trim: true },
+    /** Conditions rédigées librement : les échéances réelles sont alors saisies sur chaque facture. */
+    paymentTermsCustom: { type: Boolean, default: false },
     paymentDelayDays: { type: Number, default: 0, min: 0 },
     /** null/absent = crédit illimité. Montant entier en plus petite unité de la devise de base. */
     creditLimitMinor: { type: Number, min: 0 },
     /** Solde courant : lecture seule ici ; mis à jour par factures / règlements (phase 4). */
     balanceMinor: { type: Number, default: 0 },
     /** Conditions fiscales : client assujetti à la retenue à la source / exonéré de timbre (utilisés par les règles fiscales validées). */
-    subjectToWithholding: { type: Boolean, default: false },
+    /** Valeur par défaut d'un NOUVEAU client : assujetti. Aucune retenue n'est calculée sans règle fiscale validée applicable. */
+    subjectToWithholding: { type: Boolean, default: true },
     stampExempt: { type: Boolean, default: false },
     notes: { type: String, trim: true },
     isArchived: { type: Boolean, default: false },

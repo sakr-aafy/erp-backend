@@ -16,6 +16,7 @@ import { MAX_DOC_BYTES } from '../customers/customer.files.js';
 import { Setting } from '../../models/setting.model.js';
 import { renderTable } from '../../services/export.service.js';
 import * as v from './product.validator.js';
+import { realPurchaseOrNull } from './purchase-price.js';
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 1 },
   fileFilter: (_req, file, cb) => (/\.(xlsx|csv)$/i.test(file.originalname) ? cb(null, true) : cb(AppError.badRequest('Format non supporté : .xlsx ou .csv uniquement'))) });
@@ -43,11 +44,13 @@ productRoutes.get('/import/template', can('products:view'), h(c.template));
 productRoutes.post('/import', can('products:create'), validate({ query: v.importQuery }), ((req, _res, next) =>
   (req.query as { mode?: string }).mode === 'upsert' && !req.auth!.permissions.has('products:update') ? next(AppError.forbidden('Permission requise : products:update')) : next()) as RequestHandler,
   uploadOne, h(c.importFile));
-productRoutes.get('/brands', can('products:view'), h(async (req: Request, res: Response) => res.json(await svc.brands(cid(req)))));
+productRoutes.get('/suggest', can('products:view'), validate({ query: v.suggestQuery }), h(async (req: Request, res: Response) => res.json(await svc.suggest(cid(req), req.query as never, access(req)))));
 productRoutes.post('/pricing-preview', can('products:view'), validate({ body: v.pricingPreviewBody }), h(async (req: Request, res: Response) => res.json(await svc.pricingPreview(cid(req), req.body, access(req)))));
 productRoutes.post('/', can('products:create'), validate({ body: v.createProductBody }), h(c.create));
 productRoutes.get('/:id', can('products:view'), validate({ params: v.idParam }), h(c.get));
 productRoutes.put('/:id', can('products:update'), validate({ params: v.idParam, body: v.updateProductBody }), h(c.update));
+// Prix proposé sur une commande d'achat locale : taux RÉEL du jour (jamais estimatif) ; null si aucun taux réel
+productRoutes.get('/:id/real-purchase-price', can('products:view', 'purchases:view'), validate({ params: v.idParam }), h(async (req: Request, res: Response) => res.json({ unitPriceMinor: await realPurchaseOrNull(cid(req), await svc.getOwn(cid(req), pid(req))) })));
 productRoutes.get('/:id/pdf', can('products:view'), validate({ params: v.idParam }), h(c.fichePdf));
 productRoutes.post('/:id/status', can('products:update'), validate({ params: v.idParam, body: v.statusBody }), h(c.setStatus));
 // Groupes de la fiche : mêmes règles que PUT /:id, avec des corps restreints au groupe
@@ -117,6 +120,8 @@ categoryRoutes.get('/', can('products:view'), h(c.listCategories));
 categoryRoutes.post('/', can('products:create'), validate({ body: v.categoryBody }), h(c.createCategory));
 categoryRoutes.put('/:id', can('products:update'), validate({ params: v.idParam, body: v.categoryUpdateBody }), h(c.renameCategory));
 categoryRoutes.delete('/:id', can('products:delete'), validate({ params: v.idParam }), h(c.deleteCategory));
+categoryRoutes.post('/:id/archive', can('products:update'), validate({ params: v.idParam }), h(c.archiveCategory));
+categoryRoutes.post('/:id/restore', can('products:update'), validate({ params: v.idParam }), h(c.restoreCategory));
 
 export const unitRoutes = Router();
 unitRoutes.use(authenticate);

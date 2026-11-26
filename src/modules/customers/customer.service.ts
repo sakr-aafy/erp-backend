@@ -8,6 +8,8 @@ import { ensureCounter, nextDocumentNumber } from '../../services/numbering.serv
 import { dropNulls, normalizeContacts, normalizeTaxId } from '../parties/party.shared.js';
 import type { Column } from '../../services/export.service.js';
 import { deleteFile } from './customer.files.js';
+import { addressDto, addressesOf } from '../parties/delivery-address.js';
+import { normalizePhone, phoneDisplay, phoneInfo } from '../../utils/phone.js';
 
 type Id = Types.ObjectId;
 export type CustomerStatus = (typeof CUSTOMER_STATUSES)[number];
@@ -25,16 +27,19 @@ const addr = (a?: { street?: string | null; city?: string | null; postalCode?: s
 
 export const toDto = (c: Lean) => {
   const status = effectiveStatus(c);
-  const sameShipping = c.shippingSameAsBilling !== false;
+  const country = c.address?.country;
+  const contacts = (c.contacts ?? []).map((k) => ({ _id: (k as { _id?: Id })._id?.toString(), name: k.name, role: k.role ?? null, email: k.email ?? null, phone: k.phone ?? null, phoneInfo: phoneInfo(k.phone, country), isPrimary: !!k.isPrimary }));
+  const primary = contacts.find((k) => k.isPrimary) ?? contacts[0];
   return {
     id: c._id.toString(), code: c.code ?? null, type: (c.type ?? 'company') as 'company' | 'walk_in', name: c.name, tradeName: c.tradeName ?? null,
-    taxId: c.taxId ?? null, registryNumber: c.registryNumber ?? null, sector: c.sector ?? null,
-    address: addr(c.address), shippingSameAsBilling: sameShipping, shippingAddress: sameShipping ? addr(c.address) : addr(c.shippingAddress),
+    taxId: c.taxId ?? null,
+    address: addr(c.address), deliveryAddresses: addressesOf(c).map(addressDto),
+    phoneInfo: phoneInfo(c.phone, country), secondaryPhoneInfo: phoneInfo(c.secondaryPhone, country),
     phone: c.phone ?? null, secondaryPhone: c.secondaryPhone ?? null, email: c.email ?? null, website: c.website ?? null,
     social: { facebook: c.social?.facebook ?? null, linkedin: c.social?.linkedin ?? null, instagram: c.social?.instagram ?? null }, mapsUrl: c.mapsUrl ?? null,
-    contacts: (c.contacts ?? []).map((k) => ({ _id: (k as { _id?: Id })._id?.toString(), name: k.name, role: k.role ?? null, email: k.email ?? null, phone: k.phone ?? null, isPrimary: !!k.isPrimary })),
-    primaryContact: (() => { const k = (c.contacts ?? []).find((x) => x.isPrimary) ?? (c.contacts ?? [])[0]; return k ? { name: k.name, role: k.role ?? null, phone: k.phone ?? null, email: k.email ?? null } : null; })(),
-    paymentTerms: c.paymentTerms ?? null, paymentDelayDays: c.paymentDelayDays ?? 0, paymentMethod: c.paymentMethod ?? null, discountPct: c.discountPct ?? 0,
+    contacts,
+    primaryContact: primary ? { name: primary.name, role: primary.role, phone: primary.phone, phoneInfo: primary.phoneInfo, email: primary.email } : null,
+    paymentTerms: c.paymentTerms ?? null, paymentTermsCustom: !!c.paymentTermsCustom, paymentDelayDays: c.paymentDelayDays ?? 0, paymentMethod: c.paymentMethod ?? null, discountPct: c.discountPct ?? 0,
     creditLimitMinor: c.creditLimitMinor ?? null, balanceMinor: c.balanceMinor ?? 0,
     availableCreditMinor: c.creditLimitMinor == null ? null : Math.max(0, c.creditLimitMinor - (c.balanceMinor ?? 0)),
     creditExceeded: c.creditLimitMinor != null && (c.balanceMinor ?? 0) > c.creditLimitMinor,
@@ -57,7 +62,10 @@ export function buildFilter(companyId: Id, f: CustomerFilters): FilterQuery<Cust
   if (f.debtors) filter.balanceMinor = { $gt: 0 };
   if (f.q) {
     const rx = new RegExp(escapeRegex(f.q), 'i');
-    and.push({ $or: [{ code: rx }, { name: rx }, { tradeName: rx }, { taxId: rx }, { email: rx }, { phone: rx }, { secondaryPhone: rx }, { 'contacts.name': rx }, { 'address.city': rx }] });
+    // Les numéros sont enregistrés sans espaces (+21623108065) : une saisie « 23 108 065 » doit les retrouver
+    const digits = f.q.replace(/[\s().\-/]/g, ''); const phones = /^\+?\d{4,}$/.test(digits) ? new RegExp(escapeRegex(digits)) : null;
+    and.push({ $or: [{ code: rx }, { name: rx }, { tradeName: rx }, { taxId: rx }, { email: rx }, { phone: rx }, { secondaryPhone: rx }, { 'contacts.name': rx }, { 'address.city': rx },
+      ...(phones ? [{ phone: phones }, { secondaryPhone: phones }, { 'contacts.phone': phones }] : [])] });
   }
   if (and.length) filter.$and = and;
   return filter;
@@ -88,18 +96,22 @@ export async function getOwn(companyId: Id, id: string, session?: ClientSession)
 export const get = async (companyId: Id, id: string) => toDto(await getOwn(companyId, id));
 
 type Input = Partial<{
-  type: 'company' | 'walk_in'; name: string; tradeName: string | null; taxId: string | null; registryNumber: string | null; sector: string | null; address: object; shippingAddress: object; shippingSameAsBilling: boolean;
+  type: 'company' | 'walk_in'; name: string; tradeName: string | null; taxId: string | null; address: { country?: string | undefined }; paymentTermsCustom: boolean;
   phone: string | null; secondaryPhone: string | null; email: string | null; website: string | null; social: Record<string, string | null | undefined>; mapsUrl: string | null; contacts: { isPrimary?: boolean }[];
   paymentTerms: string | null; paymentDelayDays: number; paymentMethod: string | null; discountPct: number; notes: string | null; creditLimitMinor: number | null; subjectToWithholding: boolean; stampExempt: boolean;
 }>;
 
-function prepare(d: Input) {
+/** `country` = pays du client : détermine l'indicatif des numéros saisis au format local. */
+function prepare(d: Input, country?: string | null) {
   const out: Record<string, unknown> = { ...d };
   if ('taxId' in d) out.taxId = normalizeTaxId(d.taxId);
-  if (d.contacts) out.contacts = normalizeContacts(d.contacts);
+  for (const k of ['phone', 'secondaryPhone'] as const) if (d[k]) out[k] = normalizePhone(d[k], country);
+  if (d.contacts) out.contacts = normalizeContacts(d.contacts.map((c) => withPhone(c as { phone?: string; isPrimary?: boolean }, country)));
   if (d.social) for (const k of ['facebook', 'linkedin', 'instagram'] as const) if (d.social[k] == null) delete (out.social as Record<string, unknown>)[k];
   return out;
 }
+
+const withPhone = <T extends { phone?: string | null | undefined }>(k: T, country?: string | null): T => (k.phone ? { ...k, phone: normalizePhone(k.phone, country) } : k);
 
 /** Événement automatique de la fiche (jamais modifiable à la main). */
 export async function logAuto(companyId: Id, customerId: Id | string, kind: string, title: string, actor: Actor, meta?: Record<string, unknown>, session?: ClientSession) {
@@ -110,7 +122,7 @@ export async function create(companyId: Id, d: Input, actor: Actor = {}) {
   await ensureCounter(companyId, 'customer');
   const customer = await withTransaction(async (session) => {
     const code = await nextDocumentNumber(companyId, 'customer', session);
-    const [c] = await Customer.create([{ ...dropNulls(prepare(d)), companyId, code, status: 'active' }], { session });
+    const [c] = await Customer.create([{ ...dropNulls(prepare(d, d.address?.country)), companyId, code, status: 'active' }], { session });
     await logAuto(companyId, c!._id, 'customer_created', 'Client créé', actor, { code }, session);
     return c!;
   });
@@ -120,14 +132,13 @@ export async function create(companyId: Id, d: Input, actor: Actor = {}) {
 export async function update(companyId: Id, id: string, d: Input, actor: Actor = {}) {
   const existing = await getOwn(companyId, id);
   if (effectiveStatus(existing) === 'archived') throw AppError.conflict('Client archivé : réactivez-le avant de le modifier');
-  const p = prepare(d);
-  if (d.shippingSameAsBilling === true) p.shippingAddress = null; // adresse de livraison = facturation : aucune copie à maintenir en double
+  const p = prepare(d, d.address?.country ?? existing.address?.country);
   const $set: Record<string, unknown> = {}; const $unset: Record<string, 1> = {};
   const flat = (obj: Record<string, unknown>, prefix = '') => {
     for (const [k, v] of Object.entries(obj)) {
       const key = `${prefix}${k}`;
       if (v === undefined || v === null) $unset[key] = 1;
-      else if (['address', 'shippingAddress', 'social'].includes(k) && typeof v === 'object' && !prefix) flat(v as Record<string, unknown>, `${key}.`);
+      else if (['address', 'social'].includes(k) && typeof v === 'object' && !prefix) flat(v as Record<string, unknown>, `${key}.`);
       else $set[key] = v;
     }
   };
@@ -196,7 +207,7 @@ async function editableOwn(companyId: Id, id: string) {
 export async function addContact(companyId: Id, id: string, k: ContactInput, actor: Actor = {}) {
   const c = await editableOwn(companyId, id); const list = [...(c.contacts ?? [])] as { isPrimary?: boolean | null | undefined }[];
   if (list.length >= 20) throw AppError.conflict('20 contacts maximum par client');
-  list.push({ ...k, isPrimary: !!k.isPrimary || list.length === 0 } as never);
+  list.push({ ...withPhone(k, c.address?.country), isPrimary: !!k.isPrimary || list.length === 0 } as never);
   const primary = k.isPrimary || list.length === 1 ? list.length - 1 : list.findIndex((x) => x.isPrimary);
   const out = await saveContacts(companyId, id, withPrimary(list, primary));
   await logAuto(companyId, id, 'customer_updated', `Contact ajouté : ${k.name}`, actor, { contact: k.name });
@@ -205,7 +216,7 @@ export async function addContact(companyId: Id, id: string, k: ContactInput, act
 export async function updateContact(companyId: Id, id: string, contactId: string, k: Partial<ContactInput>, actor: Actor = {}) {
   const c = await editableOwn(companyId, id); const list = (c.contacts ?? []) as ({ _id?: Id; isPrimary?: boolean | null })[];
   const i = list.findIndex((x) => String(x._id) === contactId); if (i < 0) throw AppError.notFound('Contact introuvable');
-  const merged = { ...(list[i] as object), ...k } as { isPrimary?: boolean };
+  const merged = { ...(list[i] as object), ...withPhone(k, c.address?.country) } as { isPrimary?: boolean };
   const next = [...list]; next[i] = merged as never;
   // Un seul contact principal : en retirer le statut à l'actuel désigne le premier autre contact (ou lui-même s'il est seul)
   const other = list.findIndex((_, j) => j !== i);
@@ -236,7 +247,7 @@ export const exportColumns = (decimals: number): Column<Dto>[] => [
   { header: 'Type', key: 'type', width: 10, value: (c) => (c.type === 'walk_in' ? 'Passager' : 'Société') },
   { header: 'Matricule fiscal', key: 'taxId', width: 18, value: (c) => c.taxId },
   { header: 'Contact principal', key: 'contact', width: 24, value: (c) => c.primaryContact?.name ?? '' },
-  { header: 'Téléphone', key: 'phone', width: 16, value: (c) => c.phone ?? c.primaryContact?.phone ?? '' },
+  { header: 'Téléphone', key: 'phone', width: 18, value: (c) => phoneDisplay(c.phone ?? c.primaryContact?.phone, c.address.country) },
   { header: 'E-mail', key: 'email', width: 26, value: (c) => c.email ?? c.primaryContact?.email ?? '' },
   { header: 'Ville', key: 'city', width: 16, value: (c) => c.address.city },
   { header: 'Conditions de paiement', key: 'terms', width: 20, value: (c) => c.paymentTerms },

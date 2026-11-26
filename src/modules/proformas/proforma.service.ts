@@ -5,7 +5,8 @@ import { buildSort, escapeRegex } from '../../utils/pagination.js';
 import { withTransaction } from '../../utils/transaction.js';
 import { ensureCounter, nextDocumentNumber } from '../../services/numbering.service.js';
 import { startOfDay } from '../../services/fiscal.service.js';
-import { buildDocument, linesToInput, type DocInput } from '../sales/document.builder.js';
+import { buildDocument, frozenOf, inheritFrom, linesToInput, type DocInput } from '../sales/document.builder.js';
+import { snapshotDto } from '../parties/delivery-address.js';
 import { rangeFilter } from '../sales/document.http.js';
 import * as invoices from '../invoices/invoice.service.js';
 
@@ -15,7 +16,7 @@ type Lean = ProformaDoc & { _id: Id; createdAt?: Date };
 export const toDto = (p: Lean) => ({
   id: p._id.toString(), number: p.number, status: p.status, customerId: p.customerId.toString(), customer: p.customerSnapshot, issueDate: p.issueDate, validUntil: p.validUntil,
   lines: p.lines.map((l) => ({ ...l, id: (l as { _id: Id })._id.toString() })), globalDiscountPct: p.globalDiscountPct, globalDiscountMinor: p.globalDiscountMinor,
-  withholdingOperationType: p.withholdingOperationType ?? null, totals: p.totals, notes: p.notes ?? null, terms: p.terms ?? null,
+  withholdingOperationType: p.withholdingOperationType ?? null, totals: p.totals, notes: p.notes ?? null, terms: p.terms ?? null, paymentTerms: p.paymentTerms ?? null, paymentTermsCustom: !!p.paymentTermsCustom, deliveryAddress: snapshotDto(p.deliveryAddress as never),
   quotationId: p.quotationId?.toString() ?? null, invoiceId: p.invoiceId?.toString() ?? null, sentAt: p.sentAt ?? null, createdAt: p.createdAt,
   editable: p.status === 'pending' && !p.invoiceId,
 });
@@ -52,7 +53,7 @@ export async function create(companyId: Id, userId: Id, b: Body) {
     const number = await nextDocumentNumber(companyId, 'proforma', session, issueDate); // série distincte des factures définitives
     const [c] = await Proforma.create([{ companyId, number, customerId: doc.customer._id, customerSnapshot: doc.customerSnapshot, issueDate, validUntil: startOfDay(b.validUntil), lines: doc.lines,
       globalDiscountPct: doc.globalDiscountPct, globalDiscountMinor: doc.globalDiscountMinor, withholdingOperationType: doc.withholdingOperationType, withholding: doc.withholding, stamp: doc.stamp,
-      totals: doc.totals, notes: b.notes, terms: b.terms, createdBy: userId }] as never[], { session });
+      totals: doc.totals, notes: b.notes, terms: b.terms, ...frozenOf(doc), createdBy: userId }] as never[], { session });
     return c!;
   });
   return toDto(p.toObject() as Lean);
@@ -63,10 +64,11 @@ export async function update(companyId: Id, id: string, b: Body) {
   if (!toDto(cur).editable) throw AppError.conflict('Seule une proforma en attente et non convertie est modifiable');
   const issueDate = startOfDay(b.issueDate ?? cur.issueDate);
   return withTransaction(async (session) => {
-    const doc = await buildDocument(companyId, 'proforma', b, { date: issueDate, session });
+    const inherit = inheritFrom(cur, b.customerId);
+    const doc = await buildDocument(companyId, 'proforma', b, { date: issueDate, session, ...(inherit && { inherit }) });
     const u = await Proforma.findOneAndUpdate({ _id: id, companyId, status: 'pending', invoiceId: null }, { $set: { customerId: doc.customer._id, customerSnapshot: doc.customerSnapshot, issueDate, validUntil: startOfDay(b.validUntil),
       lines: doc.lines, globalDiscountPct: doc.globalDiscountPct, globalDiscountMinor: doc.globalDiscountMinor, withholdingOperationType: doc.withholdingOperationType ?? null, withholding: doc.withholding ?? null,
-      stamp: doc.stamp ?? null, totals: doc.totals, notes: b.notes, terms: b.terms } }, { returnDocument: 'after', session }).lean();
+      stamp: doc.stamp ?? null, totals: doc.totals, notes: b.notes, terms: b.terms, ...frozenOf(doc) } }, { returnDocument: 'after', session }).lean();
     if (!u) throw AppError.conflict('La proforma a changé entre-temps');
     return toDto(u as Lean);
   });
@@ -95,7 +97,7 @@ export async function convertToInvoice(companyId: Id, userId: Id, id: string) {
     if (p.validUntil < startOfDay(new Date())) throw AppError.conflict('Conversion impossible : proforma expirée');
     if (await DeliveryNote.exists({ companyId, 'source.id': p._id }).session(session)) throw AppError.conflict('Des bons de livraison existent pour cette proforma : facturez-les');
     const inv = await invoices.createDraft(companyId, userId, { customerId: p.customerId, lines: linesToInput(p.lines), globalDiscountPct: p.globalDiscountPct ?? 0, globalDiscountMinor: p.globalDiscountMinor ?? 0,
-      withholdingOperationType: p.withholdingOperationType ?? undefined, notes: p.notes ?? undefined }, { proformaId: p._id, ...(p.quotationId && { quotationId: p.quotationId }) }, session);
+      withholdingOperationType: p.withholdingOperationType ?? undefined, notes: p.notes ?? undefined }, { proformaId: p._id, ...(p.quotationId && { quotationId: p.quotationId }), inherit: inheritFrom(p, p.customerId) }, session);
     await Proforma.updateOne({ _id: p._id }, { status: 'converted', invoiceId: new Types.ObjectId(inv.id) }, { session });
     return { invoiceId: inv.id };
   });
