@@ -58,7 +58,7 @@ describe('fournisseurs', () => {
   it('archivage, suppression conditionnée, isolation par société', async () => {
     const s = (await mk(A.token, { name: 'Cycle de vie' })).body;
     expect((await api().post(`/api/v1/suppliers/${s.id}/archive`).set(authed(A.token))).body.isArchived).toBe(true);
-    expect((await api().put(`/api/v1/suppliers/${s.id}`).set(authed(A.token)).send({ phone: '1' })).status).toBe(409);
+    expect((await api().put(`/api/v1/suppliers/${s.id}`).set(authed(A.token)).send({ phone: '71 000 000' })).status).toBe(409);
     expect((await api().post(`/api/v1/suppliers/${s.id}/reactivate`).set(authed(A.token))).body.isArchived).toBe(false);
     expect((await api().get(`/api/v1/suppliers/${s.id}`).set(authed(B.token))).status).toBe(404);
     expect((await api().delete(`/api/v1/suppliers/${s.id}`).set(authed(B.token))).status).toBe(404);
@@ -85,7 +85,7 @@ describe('fournisseurs', () => {
     expect(l.body.items.map((i: { name: string }) => i.name)).toEqual(['Four 1', 'Four 3']); expect(l.body.summary.totalBalanceMinor).toBe(2500);
     const x = await api().get('/api/v1/suppliers/export?format=xlsx&withBalance=true').set(authed(B.token)).buffer().parse(binaryParser);
     expect(x.headers['content-disposition']).toMatch(/balance-fournisseurs/);
-    const rows = await parseXlsx(x.body as Buffer); expect(rows).toHaveLength(3); expect(rows[1]![8]).toBe('2.000');
+    const rows = await parseXlsx(x.body as Buffer); expect(rows).toHaveLength(3); expect(rows[1]![rows[0]!.indexOf('Solde dû')]).toBe('2.000');
     for (const f of ['csv', 'pdf']) expect((await api().get(`/api/v1/suppliers/export?format=${f}`).set(authed(B.token))).status).toBe(200);
     const id = (await Supplier.findOne({ companyId: B.companyId }))!._id;
     const pdf = await api().get(`/api/v1/suppliers/${id}/pdf`).set(authed(B.token)).buffer().parse(binaryParser);

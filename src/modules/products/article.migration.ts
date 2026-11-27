@@ -1,10 +1,8 @@
 import { Setting } from '../../models/setting.model.js';
 import { Category, Product } from '../../models/product.model.js';
-import { Supplier } from '../../models/supplier.model.js';
-import { Counter } from '../../models/counter.model.js';
-import { nextDocumentNumber } from '../../services/numbering.service.js';
 import { DEFAULT_ESTIMATE_RATES } from './estimate-rate.js';
 import { needsDimensionReview, volumeM3 } from './product.pricing.js';
+import { assignSupplierCodes } from '../suppliers/supplier.migration.js';
 
 export interface ArticleMigrationReport {
   dryRun: boolean;
@@ -40,14 +38,7 @@ export async function migrateArticles(opts: { dryRun?: boolean } = {}): Promise<
     if (!dryRun) await settings.updateOne({ _id: s._id }, { $set: { estimateRates: DEFAULT_ESTIMATE_RATES.map((x) => ({ ...x, updatedAt: new Date() })) } });
   }
 
-  for (const companyId of await Supplier.distinct('companyId')) {
-    const used = (await Supplier.find({ companyId, code: { $type: 'string' } }).select('code').lean()).map((x) => Number(/(\d+)$/.exec(x.code ?? '')?.[1] ?? 0));
-    if (!dryRun && used.length) await Counter.updateOne({ companyId, key: 'supplier' }, { $max: { seq: Math.max(...used) } }, { upsert: true });
-    for await (const s of Supplier.find({ companyId, code: { $exists: false } }).sort({ createdAt: 1, _id: 1 }).select('_id').lean().cursor()) {
-      r.supplierCodes++;
-      if (!dryRun) await Supplier.updateOne({ _id: s._id, companyId }, { $set: { code: await nextDocumentNumber(companyId, 'supplier') } }, { timestamps: false });
-    }
-  }
+  r.supplierCodes = await assignSupplierCodes(dryRun);
 
   for await (const p of Product.find().sort({ _id: 1 }).lean().cursor()) {
     r.productsScanned++;

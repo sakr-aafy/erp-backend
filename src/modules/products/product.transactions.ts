@@ -3,6 +3,7 @@ import { CostHistory, GoodsReceipt, ImportFile, PurchaseInvoice, PurchaseOrder, 
 import { DeliveryNote, Invoice, Proforma, Quotation } from '../../models/sales.model.js';
 import { escapeRegex } from '../../utils/pagination.js';
 import { getOwn } from './product.service.js';
+import { expireOverdue as expireQuotations } from '../quotations/quotation.service.js';
 
 type Id = Types.ObjectId;
 type Perms = ReadonlySet<string>;
@@ -15,7 +16,7 @@ export const KINDS: Record<Kind, KindDef> = {
   purchase_order: { group: 'purchases', label: 'Commande fournisseur', permission: 'purchases:view', statuses: ['draft', 'confirmed', 'partially_received', 'received', 'cancelled'], webPath: '/purchase-orders' },
   goods_receipt: { group: 'purchases', label: 'Bon de réception', permission: 'purchases:view', statuses: ['draft', 'validated'], webPath: '/goods-receipts' },
   purchase_invoice: { group: 'purchases', label: 'Facture d’achat', permission: 'purchases:view', statuses: ['draft', 'validated'], webPath: '/purchase-invoices' },
-  quotation: { group: 'sales', label: 'Devis', permission: 'quotations:view', statuses: ['pending', 'accepted', 'refused', 'expired'], webPath: '/quotations', pdfPath: '/quotations' },
+  quotation: { group: 'sales', label: 'Devis', permission: 'quotations:view', statuses: ['pending', 'sent', 'accepted', 'refused', 'expired'], webPath: '/quotations', pdfPath: '/quotations' },
   proforma: { group: 'sales', label: 'Facture proforma', permission: 'proformas:view', statuses: ['pending', 'converted', 'expired', 'cancelled'], webPath: '/proformas', pdfPath: '/proformas' },
   invoice: { group: 'sales', label: 'Facture de vente', permission: 'invoices:view', statuses: ['draft', 'validated'], webPath: '/invoices', pdfPath: '/invoices' },
   credit_note: { group: 'sales', label: 'Avoir', permission: 'invoices:view', statuses: ['draft', 'validated'], webPath: '/invoices', pdfPath: '/invoices' },
@@ -27,7 +28,7 @@ export const KINDS: Record<Kind, KindDef> = {
 export const MOVEMENT_LABEL: Record<string, string> = { receipt: 'Réception', import: 'Intégration d’importation', delivery: 'Livraison', delivery_cancel: 'Annulation de livraison', transfer_out: 'Transfert (sortie)', transfer_in: 'Transfert (entrée)', inventory_in: 'Inventaire (écart +)', inventory_out: 'Inventaire (écart −)', manual_in: 'Entrée manuelle', manual_out: 'Sortie manuelle' };
 const COST_REASON: Record<string, string> = { goods_receipt: 'Réception', import_integration: 'Intégration d’importation', manual_recalculation: 'Recalcul manuel', initial: 'Coût initial' };
 export const STATUS_LABEL: Record<string, string> = {
-  draft: 'Brouillon', confirmed: 'Confirmée', partially_received: 'Partiellement reçue', received: 'Reçue', cancelled: 'Annulé', validated: 'Validé', pending: 'En attente', accepted: 'Accepté', refused: 'Refusé', expired: 'Expiré', converted: 'Converti',
+  draft: 'Brouillon', confirmed: 'Confirmée', partially_received: 'Partiellement reçue', received: 'Reçue', cancelled: 'Annulé', validated: 'Validé', pending: 'En attente', sent: 'Envoyé', accepted: 'Accepté', refused: 'Refusé', expired: 'Expiré', converted: 'Converti',
   ordered: 'Commandé', shipped: 'Expédié', customs: 'En douane', arrived: 'Arrivé', closed: 'Clôturé', integrated: 'Intégré au stock', unpaid: 'Impayée', partial: 'Partiellement payée', paid: 'Payée', done: 'Effectué',
 };
 /** Phase d'affichage demandée par le cahier : En cours / Terminé / Annulé. */
@@ -49,6 +50,7 @@ export async function transactions(companyId: Id, productId: string, perms: Perm
   const allowed = allowedKinds(perms);
   let kinds = q.type ? allowed.filter((k) => k === q.type) : allowed;
   if (q.group) kinds = kinds.filter((k) => KINDS[k].group === q.group);
+  if (kinds.includes('quotation')) await expireQuotations(companyId);
   const take = q.page * q.limit; const whs = new Map((await Warehouse.find({ companyId }).select('code name').lean()).map((w) => [w._id.toString(), `${w.code} — ${w.name}`]));
   const rx = q.q ? new RegExp(escapeRegex(q.q), 'i') : undefined;
   const base = { companyId, 'lines.productId': pid };

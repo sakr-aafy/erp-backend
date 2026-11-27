@@ -8,6 +8,8 @@ const oid = (ref: string, required = false) => ({ type: Schema.Types.ObjectId, r
 export const lineSchema = new Schema(
   {
     productId: oid('Product'), reference: String, designation: { type: String, required: true, trim: true }, description: String, unit: String,
+    /** Devis : position affichée (10, 20, 30…). Ordre d'affichage uniquement : l'identifiant technique de la ligne est `_id`. */
+    position: Number,
     kind: { type: String, enum: ['product', 'service'], default: 'product' },
     quantity: { type: Number, required: true }, unitPriceMinor: { type: Number, required: true, min: 0 }, discountPct: { type: Number, default: 0 },
     vat: { type: new Schema({ ruleId: oid('FiscalRule'), code: String, regime: String, ratePct: Number }, { _id: false }), required: true },
@@ -50,7 +52,12 @@ const paymentTermsFields = { paymentTerms: { type: String, trim: true }, payment
 // ---- Devis ----
 const quotationSchema = new Schema({
   ...commonDoc, ...paymentTermsFields, number: { type: String, required: true }, issueDate: { type: Date, required: true }, validUntil: { type: Date, required: true },
-  status: { type: String, enum: ['pending', 'accepted', 'refused', 'expired'], default: 'pending' }, acceptedAt: Date, refusedAt: Date,
+  status: { type: String, enum: ['pending', 'sent', 'accepted', 'refused', 'expired'], default: 'pending' }, acceptedAt: Date, refusedAt: Date, expiredAt: Date,
+  /** Transmission au client (e-mail depuis l'ERP ou marquage manuel). `sentAt` : dernier envoi. */
+  sentBy: oid('User'), sentByName: String, sentTo: String, sentMethod: { type: String, enum: ['email', 'hand', 'post', 'whatsapp', 'phone', 'other'] },
+  acceptedBy: oid('User'), acceptedByName: String, acceptanceNote: String, refusedBy: oid('User'), refusedByName: String, refusalReason: String,
+  /** Devis d'origine lorsqu'il s'agit d'une duplication (révision commerciale). */
+  duplicatedFromId: oid('Quotation'),
   terms: { type: String, trim: true }, proformaId: oid('Proforma'), invoiceId: oid('Invoice'),
 }, { timestamps: true });
 quotationSchema.index({ companyId: 1, number: 1 }, { unique: true });
@@ -60,6 +67,29 @@ quotationSchema.index({ companyId: 1, 'lines.productId': 1 }); // fiche article 
 quotationSchema.index({ companyId: 1, issueDate: -1 }); // rapports : devis par période
 export type QuotationDoc = InferSchemaType<typeof quotationSchema>;
 export const Quotation = model('Quotation', quotationSchema);
+
+// ---- Chronologie métier d'un devis (distincte du journal d'audit de sécurité) : événements IMMUABLES ----
+export const QUOTATION_EVENTS = ['created', 'line_added', 'line_removed', 'price_changed', 'discount_changed', 'quantity_changed', 'designation_changed', 'vat_changed', 'lines_reordered',
+  'customer_changed', 'payment_terms_changed', 'validity_changed', 'date_changed', 'delivery_address_changed', 'global_discount_changed', 'notes_changed',
+  'marked_sent', 'email_sent', 'accepted', 'refused', 'expired', 'duplicated', 'converted_proforma', 'converted_invoice', 'invoice_unlinked'] as const;
+const quotationActivitySchema = new Schema({
+  companyId: oid('Company', true), quotationId: oid('Quotation', true), kind: { type: String, enum: QUOTATION_EVENTS, required: true },
+  occurredAt: { type: Date, required: true }, userId: oid('User'), userName: String,
+  /** Événement produit par le système (expiration automatique). */
+  system: { type: Boolean, default: false },
+  title: { type: String, required: true }, description: String,
+  line: { type: new Schema({ lineId: Schema.Types.ObjectId, reference: String, designation: String, position: Number }, { _id: false }) },
+  /** Nature des valeurs : money (plus petite unité de la devise), percent, number, text, date. */
+  valueType: { type: String, enum: ['money', 'percent', 'number', 'text', 'date'] }, oldValue: Schema.Types.Mixed, newValue: Schema.Types.Mixed,
+  related: { type: new Schema({ type: { type: String }, id: Schema.Types.ObjectId, number: String }, { _id: false }) },
+  /** Clé d'idempotence des événements qui ne peuvent se produire qu'une fois (création, expiration, conversion…). */
+  eventKey: String,
+}, { timestamps: { createdAt: true, updatedAt: false } });
+quotationActivitySchema.index({ companyId: 1, quotationId: 1, occurredAt: -1 });
+quotationActivitySchema.index({ companyId: 1, eventKey: 1 }, { unique: true, partialFilterExpression: { eventKey: { $type: 'string' } } });
+quotationActivitySchema.pre(['updateOne', 'updateMany', 'findOneAndUpdate', 'replaceOne', 'deleteOne', 'deleteMany', 'findOneAndDelete'], function () { throw new Error('L’historique d’un devis ne se modifie ni ne se supprime'); });
+export type QuotationActivityDoc = InferSchemaType<typeof quotationActivitySchema>;
+export const QuotationActivity = model('QuotationActivity', quotationActivitySchema);
 
 // ---- Facture proforma (série de numéros distincte des factures définitives) ----
 const proformaSchema = new Schema({

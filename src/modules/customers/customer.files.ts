@@ -8,7 +8,7 @@ import { AppError } from '../../utils/errors.js';
  * Contrôles à l'envoi : extension autorisée, signature (octets magiques) cohérente avec l'extension, taille, jamais d'exécutable.
  */
 export const MAX_DOC_BYTES = 10 * 1024 * 1024;
-export const CUSTOMER_BUCKET = 'customerFiles'; export const PRODUCT_BUCKET = 'productFiles';
+export const CUSTOMER_BUCKET = 'customerFiles'; export const PRODUCT_BUCKET = 'productFiles'; export const SUPPLIER_BUCKET = 'supplierFiles';
 
 interface Kind { mime: string; inline: boolean; check: (b: Buffer) => boolean }
 const startsWith = (b: Buffer, sig: number[], at = 0) => sig.every((v, i) => b[at + i] === v);

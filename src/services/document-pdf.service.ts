@@ -10,7 +10,9 @@ export interface PdfDoc {
   number?: string | null | undefined; draft?: boolean;
   date: Date; secondaryDateLabel?: string; secondaryDate?: Date | null | undefined;
   customer: { name?: string | null | undefined; taxId?: string | null | undefined; address?: { street?: string | null | undefined; city?: string | null | undefined; postalCode?: string | null | undefined; country?: string | null | undefined } | null | undefined };
-  lines: { reference?: string | null | undefined; designation: string; unit?: string | null | undefined; quantity: number; unitPriceMinor: number; discountPct?: number | null | undefined; netHtMinor?: number | null | undefined; vat: { code?: string | null | undefined; ratePct?: number | null | undefined; regime?: string | null | undefined } }[];
+  /** « quotation » : colonnes du devis (Pos., Référence, …), remise affichée seulement si au moins une ligne en a, pages numérotées. */
+  layout?: 'quotation';
+  lines: { position?: number | null | undefined; discountMinor?: number | null | undefined; reference?: string | null | undefined; designation: string; unit?: string | null | undefined; quantity: number; unitPriceMinor: number; discountPct?: number | null | undefined; netHtMinor?: number | null | undefined; vat: { code?: string | null | undefined; ratePct?: number | null | undefined; regime?: string | null | undefined } }[];
   totals: { grossMinor?: number | null | undefined; lineDiscountsMinor?: number | null | undefined; globalDiscountMinor?: number | null | undefined; totalHtMinor?: number | null | undefined;
     vatGroups?: { vatCode?: string | null | undefined; regime?: string | null | undefined; ratePct?: number | null | undefined; baseMinor?: number | null | undefined; vatMinor?: number | null | undefined }[] | null | undefined;
     totalVatMinor?: number | null | undefined; totalTtcMinor?: number | null | undefined; stampMinor?: number | null | undefined; withholdingMinor?: number | null | undefined; totalPayableMinor?: number | null | undefined };
@@ -31,7 +33,8 @@ export async function renderDocumentPdf(companyId: Types.ObjectId, d: PdfDoc): P
   const m = (v: number | null | undefined) => ((v ?? 0) / 10 ** dec).toLocaleString('fr-FR', { minimumFractionDigits: dec, maximumFractionDigits: dec }).replace(/\u202f/g, '\u00a0');
   const dt = (x: Date) => new Date(x).toLocaleDateString('fr-FR', { timeZone: 'UTC' });
 
-  const doc = new PDFDocument({ size: 'A4', margin: 40, compress: process.env.NODE_ENV !== 'test', info: { Title: `${d.title} ${d.number ?? ''}` } }); // flux non compressé en test : le contenu est vérifiable
+  const quote = d.layout === 'quotation';
+  const doc = new PDFDocument({ size: 'A4', margin: 40, bufferPages: quote, compress: process.env.NODE_ENV !== 'test', info: { Title: `${d.title} ${d.number ?? ''}` } }); // flux non compressé en test : le contenu est vérifiable
   const chunks: Buffer[] = []; doc.on('data', (c: Buffer) => chunks.push(c));
   const done = new Promise<Buffer>((res, rej) => { doc.on('end', () => res(Buffer.concat(chunks))); doc.on('error', rej); });
   const L = 40; const R = doc.page.width - 40; const W = R - L;
@@ -67,6 +70,8 @@ export async function renderDocumentPdf(companyId: Types.ObjectId, d: PdfDoc): P
 
   // Tableau des lignes
   const showPrices = d.showPrices !== false;
+  if (quote) quotationTable(doc, d, { L, R, W, m, cur });
+  else {
   const cols = showPrices
     ? [{ h: 'Réf.', w: 55 }, { h: 'Désignation', w: 175 }, { h: 'Qté', w: 40, r: true }, { h: 'P.U. HT', w: 60, r: true }, { h: 'Rem.%', w: 38, r: true }, { h: 'TVA', w: 40, r: true }, { h: 'Total HT', w: 107, r: true }]
     : [{ h: 'Réf.', w: 90 }, { h: 'Désignation', w: 320 }, { h: 'Unité', w: 50 }, { h: 'Quantité', w: 55, r: true }];
@@ -86,10 +91,13 @@ export async function renderDocumentPdf(companyId: Types.ObjectId, d: PdfDoc): P
     cols.forEach((c, i) => { const t = vals[i]!; const hh = doc.heightOfString(t, { width: c.w - 6 }); h = Math.max(h, hh); doc.text(t, x + 3, y, { width: c.w - 6, align: c.r ? 'right' : 'left' }); x += c.w; });
     doc.y = y + h + 4; doc.moveTo(L, doc.y - 2).lineTo(R, doc.y - 2).stroke('#e5e8ee');
   }
+  }
 
   // Totaux
   if (showPrices) {
-    if (doc.y > doc.page.height - 190) doc.addPage();
+    // Le récapitulatif reste groupé : nouvelle page s'il ne tient pas entièrement
+    const needed = quote ? 80 + (d.totals.vatGroups?.length ?? 0) * 13 : 150;
+    if (doc.y > doc.page.height - 40 - needed) doc.addPage();
     doc.moveDown(0.6); const ty = doc.y; const tx = L + W - 230;
     const row = (k: string, v: string, bold = false) => { const y = doc.y; doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(bold ? 10 : 9).text(k, tx, y, { width: 130 }); doc.text(v, tx + 130, y, { width: 100, align: 'right' }); doc.y = y + (bold ? 15 : 13); };
     const t = d.totals;
@@ -107,8 +115,58 @@ export async function renderDocumentPdf(companyId: Types.ObjectId, d: PdfDoc): P
   if (d.paymentTerms) doc.moveDown().font('Helvetica').fontSize(8.5).fillColor('#444').text(`Conditions de paiement : ${d.paymentTerms}`, L, doc.y, { width: W });
   if (d.terms) doc.moveDown().font('Helvetica').fontSize(8.5).fillColor('#444').text(`Conditions : ${d.terms}`, L, doc.y, { width: W });
   if (d.notes) doc.moveDown(0.5).fillColor('#444').text(d.notes, L, doc.y, { width: W });
-  doc.page.margins.bottom = 0; // le pied de page est dans la marge basse : sans cela il serait rejeté sur une page vide
-  doc.fillColor('#888').fontSize(7.5).text(`${company?.name ?? ''} — montants en ${cur}`, L, doc.page.height - 40, { width: W, align: 'center', lineBreak: false });
+  const pages = quote ? doc.bufferedPageRange().count : 1;
+  for (let i = 0; i < pages; i++) {
+    if (quote) doc.switchToPage(i);
+    doc.page.margins.bottom = 0; // le pied de page est dans la marge basse : sans cela il serait rejeté sur une page vide
+    doc.font('Helvetica').fillColor('#888').fontSize(7.5).text(`${company?.name ?? ''} — montants en ${cur}${quote && pages > 1 ? ` — page ${i + 1} / ${pages}` : ''}`, L, doc.page.height - 40, { width: W, align: 'center', lineBreak: false });
+  }
   doc.end();
   return done;
+}
+
+interface Layout { L: number; R: number; W: number; m: (v: number | null | undefined) => string; cur: string }
+interface Col { h: string; w: number; r?: boolean; wrap?: boolean }
+const fr = (v: number, max: number) => v.toLocaleString('fr-FR', { maximumFractionDigits: max }).replace(/\u202f/g, '\u00a0');
+const VAT_SHORT: Record<string, string> = { zero: '0 %', exempt: 'Exonéré', suspended: 'Suspendue' };
+
+/**
+ * Tableau du devis : Pos. | Référence | Désignation | Qté | P.U. HT | Rem.% | TVA | Total HT.
+ * Remise : colonne absente si aucune ligne n'a de remise (sa largeur revient à la désignation) ; sinon « — » pour les lignes
+ * sans remise. Une remise de ligne exprimée en montant reste un montant. La remise globale n'apparaît qu'au récapitulatif.
+ */
+function quotationTable(doc: PDFKit.PDFDocument, d: PdfDoc, { L, R, W, m, cur }: Layout) {
+  const discounted = (l: PdfDoc['lines'][number]) => (l.discountPct ?? 0) > 0 || (l.discountMinor ?? 0) > 0;
+  const showDiscount = d.lines.some(discounted);
+  const cols: Col[] = [{ h: 'Pos.', w: 30 }, { h: 'Référence', w: 66, wrap: true }, { h: 'Désignation', w: 0, wrap: true }, { h: 'Qté', w: 34, r: true }, { h: 'P.U. HT', w: 68, r: true },
+    ...(showDiscount ? [{ h: 'Rem.%', w: 40, r: true }] : []), { h: 'TVA', w: 44, r: true }, { h: 'Total HT', w: 76, r: true }];
+  cols[2]!.w = W - cols.reduce((s, c) => s + c.w, 0);
+  const bottom = () => doc.page.height - 62; // au-dessus du pied de page
+  const SIZE = 8.5;
+  const head = () => {
+    const y = doc.y; doc.rect(L, y, W, 18).fill('#eef1f6'); doc.fillColor('#000').font('Helvetica-Bold').fontSize(8);
+    let x = L; for (const c of cols) { doc.text(c.h, x + 3, y + 5, { width: c.w - 6, align: c.r ? 'right' : 'left', lineBreak: false }); x += c.w; }
+    doc.y = y + 22; doc.font('Helvetica').fontSize(SIZE);
+  };
+  const continuation = () => { doc.addPage(); doc.font('Helvetica-Bold').fontSize(9).fillColor('#444').text(`${d.title} ${d.number ?? ''} (suite) — ${d.customer.name ?? ''}`, L, 40, { width: W }); doc.fillColor('#000'); doc.moveDown(0.5); head(); };
+  if (doc.y > bottom() - 60) { doc.addPage(); doc.y = 40; }
+  head();
+  for (const [i, l] of d.lines.entries()) {
+    const discount = (l.discountPct ?? 0) > 0 ? `${fr(l.discountPct!, 2)} %` : (l.discountMinor ?? 0) > 0 ? `- ${m(l.discountMinor)}` : '—';
+    const vals = [String(l.position ?? (i + 1) * 10), l.reference ?? '', l.designation, fr(l.quantity, 3), m(l.unitPriceMinor), ...(showDiscount ? [discount] : []),
+      l.vat.regime === 'taxable' || !l.vat.regime ? `${fr(l.vat.ratePct ?? 0, 2)} %` : VAT_SHORT[l.vat.regime] ?? '—', m(l.netHtMinor)];
+    doc.font('Helvetica').fontSize(SIZE);
+    const h = Math.max(12, ...cols.map((c, k) => (c.wrap ? doc.heightOfString(vals[k]!, { width: c.w - 6 }) : 0)));
+    if (doc.y + h > bottom()) continuation(); // une ligne n'est jamais coupée entre deux pages
+    const y = doc.y; let x = L;
+    cols.forEach((c, k) => {
+      const t = vals[k]!;
+      // Montants sur une seule ligne : la taille se réduit si nécessaire pour ne jamais déborder
+      let size = SIZE; doc.font(k === 0 ? 'Helvetica-Bold' : 'Helvetica').fontSize(size);
+      if (!c.wrap) while (size > 5 && doc.widthOfString(t) > c.w - 6) doc.fontSize(--size);
+      doc.text(t, x + 3, y, { width: c.w - 6, align: c.r ? 'right' : 'left', ...(!c.wrap && { lineBreak: false }) }); x += c.w;
+    });
+    doc.y = y + h + 5; doc.moveTo(L, doc.y - 3).lineTo(R, doc.y - 3).stroke('#e5e8ee');
+  }
+  doc.font('Helvetica').fontSize(7.5).fillColor('#666').text(`Montants en ${cur}`, L, doc.y, { width: W, align: 'right' }); doc.fillColor('#000');
 }

@@ -7,6 +7,7 @@ import { hashPassword } from '../../services/password.service.js';
 import { withTransaction } from '../../utils/transaction.js';
 import { ALL_PERMISSIONS } from '../../config/permissions.js';
 import { AppError } from '../../utils/errors.js';
+import { initSupplierCategories } from '../suppliers/supplier.categories.js';
 
 export const ADMIN_ROLE_NAME = 'Administrateur';
 
@@ -17,7 +18,7 @@ export interface NewCompanyInput {
 
 /** Crée atomiquement : société + rôle Administrateur (système) + paramètres vides + premier administrateur. */
 export async function createCompanyWithAdmin(input: NewCompanyInput) {
-  return withTransaction(async (session: ClientSession) => {
+  const created = await withTransaction(async (session: ClientSession) => {
     if (await User.exists({ email: input.admin.email.toLowerCase() }).session(session)) throw AppError.conflict('E-mail déjà utilisé');
     const [company] = await Company.create([input.company], { session });
     const [role] = await Role.create([{ companyId: company!._id, name: ADMIN_ROLE_NAME, description: 'Accès complet', isSystem: true, permissions: ALL_PERMISSIONS }], { session });
@@ -28,6 +29,8 @@ export async function createCompanyWithAdmin(input: NewCompanyInput) {
     }], { session });
     return { company: company!, role: role!, user: user! };
   });
+  await initSupplierCategories(created.company._id); // catégories de fournisseurs proposées (administrables ensuite)
+  return created;
 }
 
 export const getCompany = async (id: Types.ObjectId) => {

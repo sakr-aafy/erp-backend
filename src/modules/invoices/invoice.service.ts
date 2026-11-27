@@ -3,6 +3,7 @@ import { TreasuryAccount } from '../../models/finance.model.js';
 import { Types, type ClientSession, type QueryFilter } from 'mongoose';
 import { Customer } from '../../models/customer.model.js';
 import { DeliveryNote, Invoice, Payment, Proforma, Quotation, type InvoiceDoc } from '../../models/sales.model.js';
+import { record as recordQuotationEvent, type Actor } from '../quotations/quotation.activity.js';
 import { AppError } from '../../utils/errors.js';
 import { buildSort, escapeRegex } from '../../utils/pagination.js';
 import { withTransaction } from '../../utils/transaction.js';
@@ -98,13 +99,16 @@ export async function updateDraft(companyId: Id, id: string, b: InvoiceBody) {
 }
 
 /** Suppression : brouillons uniquement. Libère les documents sources (BL, devis, proforma). */
-export async function removeDraft(companyId: Id, id: string) {
+export async function removeDraft(companyId: Id, id: string, actor: Actor = {}) {
   return withTransaction(async (session) => {
     const inv = await getOwn(companyId, id, session);
     if (inv.status !== 'draft') throw AppError.conflict('Une facture validée ne peut pas être supprimée : émettez une facture d’avoir.');
     await Invoice.deleteOne({ _id: id, companyId, status: 'draft' }, { session });
     if ((inv.deliveryNoteIds ?? []).length) await DeliveryNote.updateMany({ companyId, _id: { $in: inv.deliveryNoteIds } }, { $unset: { invoiceId: 1 } }, { session });
-    if (inv.quotationId) await Quotation.updateOne({ _id: inv.quotationId, invoiceId: inv._id }, { $unset: { invoiceId: 1 } }, { session });
+    if (inv.quotationId) {
+      const freed = await Quotation.updateOne({ _id: inv.quotationId, companyId, invoiceId: inv._id }, { $unset: { invoiceId: 1 } }, { session });
+      if (freed.modifiedCount) await recordQuotationEvent(companyId, inv.quotationId, [{ kind: 'invoice_unlinked', description: 'La facture brouillon issue de ce devis a été supprimée', eventKey: `unlinked:${inv._id}` }], actor, session);
+    }
     if (inv.proformaId) await Proforma.updateOne({ _id: inv.proformaId, invoiceId: inv._id }, { status: 'pending', $unset: { invoiceId: 1 } }, { session });
     return inv;
   });

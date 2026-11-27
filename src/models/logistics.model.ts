@@ -64,7 +64,9 @@ const purchaseAddresses = { supplierAddress: { type: addressSnapshotSchema }, re
 const purchaseOrderSchema = new Schema({
   ...purchaseAddresses, companyId: company, number: { type: String, required: true }, supplierId: oid('Supplier', true), supplier: supplierSnapshot, orderDate: { type: Date, required: true }, expectedDate: Date,
   status: { type: String, enum: ['draft', 'confirmed', 'partially_received', 'received', 'cancelled'], default: 'draft' },
-  lines: [purchaseLineSchema], totals: { type: totalsSchema, required: true }, notes: String, createdBy: oid('User'), confirmedAt: Date, cancelledAt: Date, cancelReason: String,
+  lines: [purchaseLineSchema], totals: { type: totalsSchema, required: true }, notes: String,
+  /** Conditions de paiement convenues, copiées de la fiche fournisseur à la création (modifiables en brouillon). */
+  paymentTerms: String, createdBy: oid('User'), confirmedAt: Date, cancelledAt: Date, cancelReason: String,
 }, { timestamps: true });
 purchaseOrderSchema.index({ companyId: 1, number: 1 }, { unique: true });
 purchaseOrderSchema.index({ companyId: 1, status: 1, orderDate: -1 });

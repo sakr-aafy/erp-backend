@@ -16,6 +16,8 @@ export type DocType = 'quotation' | 'proforma' | 'invoice' | 'creditNote' | 'del
 
 // ---- Schémas de validation communs (API) ----
 export const lineBody = z.object({
+  /** Identifiant de la ligne existante (devis) : conservé à la modification pour suivre son historique. Ignoré ailleurs. */
+  id: objectId.optional(),
   productId: objectId.optional(), designation: z.string().trim().min(1).max(300).optional(), description: z.string().trim().max(1000).optional(),
   unit: z.string().trim().max(12).optional(),
   quantity: z.number().gt(0).max(1e9).refine((q) => Math.abs(q * 1000 - Math.round(q * 1000)) < 1e-6, '3 décimales maximum'),

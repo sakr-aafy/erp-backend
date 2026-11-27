@@ -71,6 +71,13 @@ describe('fiche client — création, code, validation', () => {
     expect((await A.j.post('/customers', { name: 'Remise limite', discountPct: 100, creditLimitMinor: 0 })).status).toBe(201);
   });
 
+  it('un réseau social vidé à la modification est effacé, les autres sont conservés', async () => {
+    const c = (await A.j.post('/customers', { name: 'Réseaux sociaux', social: { facebook: 'https://facebook.com/r', linkedin: 'https://linkedin.com/company/r', instagram: null } })).body;
+    expect(c.social).toMatchObject({ facebook: 'https://facebook.com/r', instagram: null });
+    const u = await A.j.put(`/customers/${c.id}`, { social: { facebook: null, linkedin: 'https://linkedin.com/company/r' } });
+    expect(u.status).toBe(200); expect(u.body.social).toMatchObject({ facebook: null, linkedin: 'https://linkedin.com/company/r' });
+    await A.j.del(`/customers/${c.id}`);
+  });
   it('le code client ne peut pas être modifié', async () => {
     const c = (await A.j.get('/customers?q=Passage')).body.items[0];
     expect((await A.j.put(`/customers/${c.id}`, { code: 'CL-77777' })).status).toBe(422);

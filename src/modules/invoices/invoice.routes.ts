@@ -32,7 +32,7 @@ invoiceRoutes.put('/:id', can('invoices:update'), validate({ params: idParam, bo
   const i = await svc.updateDraft(cid(req), pid(req), req.body); await audit(req, { action: 'update', resource: 'invoice', resourceId: i.id, meta: { totalTtcMinor: i.totals.totalTtcMinor } }); res.json(i);
 }));
 invoiceRoutes.delete('/:id', can('invoices:delete'), validate({ params: idParam }), h(async (req: Request, res: Response) => {
-  const i = await svc.removeDraft(cid(req), pid(req)); await audit(req, { action: 'delete', resource: 'invoice', resourceId: pid(req), meta: { type: i.type } }); res.status(204).end();
+  const i = await svc.removeDraft(cid(req), pid(req), { userId: req.auth!.userId, name: req.auth!.name }); await audit(req, { action: 'delete', resource: 'invoice', resourceId: pid(req), meta: { type: i.type } }); res.status(204).end();
 }));
 // Validation = acte fiscal irréversible (numéro légal, solde client) : permission dédiée
 invoiceRoutes.post('/:id/validate', can('invoices:validate'), validate({ params: idParam }), h(async (req: Request, res: Response) => {

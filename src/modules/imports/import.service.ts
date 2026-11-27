@@ -14,7 +14,7 @@ import { emitDomainEvent } from '../../services/domain-events.js';
 import { ensureCounter, nextDocumentNumber } from '../../services/numbering.service.js';
 import { ensureLevels } from '../../services/stock.service.js';
 import { startOfDay } from '../../services/fiscal.service.js';
-import { assertCanOrder } from '../suppliers/supplier.service.js';
+import { assertCanOrder, assertSupplierActive } from '../suppliers/supplier.service.js';
 import { Supplier } from '../../models/supplier.model.js';
 import { minorInt } from '../parties/party.shared.js';
 import { rangeFilter } from '../sales/document.http.js';
@@ -104,6 +104,7 @@ export async function create(companyId: Id, userId: Id, b: z.infer<typeof create
 export async function update(companyId: Id, id: string, b: z.infer<typeof createBody>) {
   const f = await getOwn(companyId, id); if (!['draft', 'ordered'].includes(f.status)) throw AppError.conflict('Lignes non modifiables à ce stade du dossier');
   const sup = await Supplier.findOne({ _id: b.supplierId, companyId }).lean(); if (!sup?.isForeign) throw AppError.badRequest('Fournisseur étranger requis');
+  if (String(f.supplierId) !== String(sup._id)) assertSupplierActive(sup);
   const date = startOfDay(b.orderDate ?? f.orderDate); await decimalsOf(companyId, b.currency);
   const rate = b.exchangeRate ? { rate: b.exchangeRate, rateDate: date } : await resolveRate(companyId, b.currency, date);
   f.set({ supplierId: sup._id, supplier: { name: sup.name, taxId: sup.taxId }, currency: b.currency, exchangeRate: rate.rate, exchangeRateDate: rate.rateDate, orderDate: date, reference: b.reference, lines: await buildLines(companyId, b.lines), notes: b.notes });

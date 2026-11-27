@@ -3,6 +3,7 @@ import { Category, PRODUCT_STATUSES, Product, ProductActivity, ProductDocument, 
 import { StockLevel, Warehouse } from '../../models/logistics.model.js';
 import { Setting } from '../../models/setting.model.js';
 import { Supplier } from '../../models/supplier.model.js';
+import { effectiveStatus as supplierStatus } from '../suppliers/supplier.service.js';
 import { vatCodeExists } from '../../services/fiscal.service.js';
 import { AppError } from '../../utils/errors.js';
 import { buildSort, escapeRegex } from '../../utils/pagination.js';
@@ -257,10 +258,11 @@ async function resolveCategory(companyId: Id, d: Input, existing?: Lean): Promis
 async function validateRefs(companyId: Id, d: Input, existing?: Lean) {
   if (d.unitId && !(await Unit.exists({ _id: d.unitId, companyId }))) throw AppError.badRequest('Unité de vente invalide');
   if (d.mainSupplierId) {
-    const sup = await Supplier.findOne({ _id: d.mainSupplierId, companyId }).select('isArchived').lean();
+    const sup = await Supplier.findOne({ _id: d.mainSupplierId, companyId }).select('isArchived status').lean();
     if (!sup) throw AppError.badRequest('Fournisseur habituel invalide');
-    // Un fournisseur archivé reste visible sur les articles qui l'avaient déjà, mais n'est plus associable
-    if (sup.isArchived && (!existing || refId(existing.mainSupplierId) !== d.mainSupplierId)) throw AppError.badRequest('Fournisseur archivé : choisissez un fournisseur actif');
+    // Un fournisseur archivé ou inactif reste visible sur les articles qui l'avaient déjà, mais n'est plus associable
+    const st = supplierStatus(sup);
+    if ((st === 'archived' || st === 'inactive') && (!existing || refId(existing.mainSupplierId) !== d.mainSupplierId)) throw AppError.badRequest(`Fournisseur ${st === 'archived' ? 'archivé' : 'inactif'} : choisissez un fournisseur actif`);
   }
   if (d.vatRateCode && !(await vatCodeExists(companyId, d.vatRateCode))) throw AppError.badRequest(`Code de TVA « ${d.vatRateCode} » inconnu : aucune règle fiscale validée (Fiscalité > TVA)`);
   const problems = packagingProblems(d.packaging as never); if (problems.length) throw AppError.badRequest(problems.join(' ; '));

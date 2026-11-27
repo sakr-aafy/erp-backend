@@ -108,7 +108,7 @@ export async function importProducts(companyId: Id, buffer: Buffer, filename: st
 
   const [settings, cats, units, suppliers, existing] = await Promise.all([
     Setting.findOne({ companyId }).lean(), Category.find({ companyId }).lean(), Unit.find({ companyId }).lean(),
-    Supplier.find({ companyId }).select('name taxId code isArchived').lean(), Product.find({ companyId }).select('reference categoryId mainSupplierId purchaseCurrency purchasePriceForeignMinor').lean(),
+    Supplier.find({ companyId }).select('name taxId code isArchived status').lean(), Product.find({ companyId }).select('reference categoryId mainSupplierId purchaseCurrency purchasePriceForeignMinor').lean(),
   ]);
   const decimals = settings?.currencies.find((c) => c.code === settings.baseCurrency)?.decimals ?? 3;
   const vatCodes = new Set((await FiscalRule.distinct('code', { companyId, kind: 'vat', status: 'validated' })) as string[]);
@@ -171,7 +171,7 @@ export async function importProducts(companyId: Id, buffer: Buffer, filename: st
     if (supRaw) {
       const s = supByCode.get(supRaw.toLowerCase()) ?? supByTax.get(normalizeTaxId(supRaw)!) ?? supByName.get(supRaw.toLowerCase());
       if (!s) err('supplier', `Fournisseur introuvable « ${supRaw} »`);
-      else if (s.isArchived && !current?.mainSupplierId?.equals(s._id)) err('supplier', `Fournisseur « ${supRaw} » archivé`);
+      else if ((s.isArchived || s.status === 'inactive') && !current?.mainSupplierId?.equals(s._id)) err('supplier', `Fournisseur « ${supRaw} » ${s.isArchived ? 'archivé' : 'inactif'}`);
       else mainSupplierId = s._id;
     }
     const serialRaw = norm(get(r, 'serial'));

@@ -30,6 +30,8 @@ const settingSchema = new Schema(
     currencies: { type: [currencySchema], default: [{ code: 'TND', name: 'Dinar tunisien', symbol: 'DT', decimals: 3 }] },
     numbering: { type: [numberingSchema], default: [] },
     supplierBlockThresholdMinor: { type: Number },
+    /** Catégories de fournisseurs proposées par défaut déjà créées : elles ne sont plus recréées ensuite (suppression respectée). */
+    supplierCategoriesInitialisedAt: { type: Date },
     estimateRates: { type: [estimateRateSchema], default: () => DEFAULT_ESTIMATE_RATES.map((r) => ({ ...r })) },
   },
   { timestamps: true },

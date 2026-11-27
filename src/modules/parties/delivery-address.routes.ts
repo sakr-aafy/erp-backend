@@ -14,6 +14,8 @@ const idParam = z.object({ id: objectId });
 export function mountDeliveryAddresses<T>(router: Router, opts: AddressOwner & {
   resource: 'customer' | 'supplier'; permission: string; dto: (companyId: Types.ObjectId, id: string) => Promise<T>;
   onChange?: (req: Request, partyId: string, title: string) => Promise<void>;
+  /** Filtre la fiche renvoyée selon les permissions de l'utilisateur. */
+  view?: (req: Request, dto: T) => T;
 }) {
   const svc = addressService(opts);
   const cid = (req: Request) => req.auth!.companyId;
@@ -22,7 +24,8 @@ export function mountDeliveryAddresses<T>(router: Router, opts: AddressOwner & {
   const done = async (req: Request, res: Response, action: string, title: string, r: { id: string; label: string; archived?: boolean }, status = 200) => {
     await audit(req, { action, resource: opts.resource, resourceId: pid(req), meta: { addressId: r.id, label: r.label, ...(r.archived !== undefined && { archived: r.archived }) } });
     await opts.onChange?.(req, pid(req), `${title} : ${r.label}`);
-    res.status(status).json({ ...(await opts.dto(cid(req), pid(req))), ...(r.archived !== undefined && { addressArchived: r.archived }) });
+    const dto = await opts.dto(cid(req), pid(req));
+    res.status(status).json({ ...(opts.view ? opts.view(req, dto) : dto), ...(r.archived !== undefined && { addressArchived: r.archived }) });
   };
   const base = '/:id/delivery-addresses';
   router.post(base, can(opts.permission), validate({ params: idParam, body: deliveryAddressBody }),

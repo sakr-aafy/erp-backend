@@ -3,6 +3,7 @@ import { Product, } from '../../models/product.model.js';
 import { Category } from '../../models/product.model.js';
 import { Invoice, Quotation } from '../../models/sales.model.js';
 import { User } from '../../models/user.model.js';
+import { expireOverdue as expireQuotations } from '../quotations/quotation.service.js';
 import { barChart, bucketExpr, fillPeriods, lineChart, nameMap, oid, pct, range, sum, sumField } from './report.helpers.js';
 import { MAX_ROWS, type Ctx, type ReportDef, type Row } from './report.types.js';
 
@@ -91,14 +92,15 @@ export const commercialReports: ReportDef[] = [
       return { rows, totals: { user: 'Total', invoices: sum(rows, 'invoices'), creditNotes: sum(rows, 'creditNotes'), htMinor: sum(rows, 'htMinor'), ttcMinor: sum(rows, 'ttcMinor') }, chart: barChart('money', 'CA HT', rows, 'user', 'htMinor', 10) };
     } },
   { key: 'quotations', group: 'commercial', title: 'Devis : acceptés, refusés, conversion', description: 'Répartition des devis par statut, montants et taux de conversion.',
-    perms: ['quotations:view'], filters: ['period', 'customerId', 'status'], statusOptions: [{ value: 'pending', label: 'En attente' }, { value: 'accepted', label: 'Accepté' }, { value: 'refused', label: 'Refusé' }, { value: 'expired', label: 'Expiré' }],
+    perms: ['quotations:view'], filters: ['period', 'customerId', 'status'], statusOptions: [{ value: 'pending', label: 'En attente' }, { value: 'sent', label: 'Envoyé' }, { value: 'accepted', label: 'Accepté' }, { value: 'refused', label: 'Refusé' }, { value: 'expired', label: 'Expiré' }],
     columns: [{ key: 'status', label: 'Statut' }, { key: 'count', label: 'Devis', type: 'int' }, money('htMinor', 'Total HT'), money('ttcMinor', 'Total TTC'), { key: 'sharePct', label: 'Part', type: 'pct' }],
     async run(c) {
+      await expireQuotations(c.companyId); // statuts à jour avant le calcul
       const r = range(c.f); const match = { companyId: c.companyId, ...(r && { issueDate: r }), ...(c.f.customerId && { customerId: oid(c.f.customerId) }), ...(c.f.status && { status: c.f.status }) };
       const g = await Quotation.aggregate<{ _id: string; count: number; htMinor: number; ttcMinor: number; converted: number }>([{ $match: match }, { $group: { _id: '$status', count: { $sum: 1 }, htMinor: { $sum: '$totals.totalHtMinor' }, ttcMinor: { $sum: '$totals.totalTtcMinor' },
         converted: { $sum: { $cond: [{ $or: [{ $ne: [{ $ifNull: ['$invoiceId', null] }, null] }, { $ne: [{ $ifNull: ['$proformaId', null] }, null] }] }, 1, 0] } } } }]);
-      const L: Record<string, string> = { pending: 'En attente', accepted: 'Accepté', refused: 'Refusé', expired: 'Expiré' }; const total = g.reduce((s, x) => s + x.count, 0);
-      const rows: Row[] = ['pending', 'accepted', 'refused', 'expired'].map((s) => { const x = g.find((y) => y._id === s); return { status: L[s], statusKey: s, count: x?.count ?? 0, htMinor: x?.htMinor ?? 0, ttcMinor: x?.ttcMinor ?? 0, sharePct: pct(x?.count ?? 0, total) }; });
+      const L: Record<string, string> = { pending: 'En attente', sent: 'Envoyé', accepted: 'Accepté', refused: 'Refusé', expired: 'Expiré' }; const total = g.reduce((s, x) => s + x.count, 0);
+      const rows: Row[] = ['pending', 'sent', 'accepted', 'refused', 'expired'].map((s) => { const x = g.find((y) => y._id === s); return { status: L[s], statusKey: s, count: x?.count ?? 0, htMinor: x?.htMinor ?? 0, ttcMinor: x?.ttcMinor ?? 0, sharePct: pct(x?.count ?? 0, total) }; });
       const n = (s: string) => g.find((y) => y._id === s)?.count ?? 0; const decided = n('accepted') + n('refused') + n('expired'); const converted = g.reduce((s, x) => s + x.converted, 0);
       return { rows, totals: { status: 'Total', count: total, htMinor: sum(rows, 'htMinor'), ttcMinor: sum(rows, 'ttcMinor') },
         kpis: [{ label: 'Taux d’acceptation', value: pct(n('accepted'), decided), type: 'pct' }, { label: 'Devis transformés (proforma ou facture)', value: converted, type: 'int' }, { label: 'Taux de transformation', value: pct(converted, total), type: 'pct' }],

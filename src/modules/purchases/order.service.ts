@@ -6,17 +6,19 @@ import { buildSort, escapeRegex, objectId } from '../../utils/pagination.js';
 import { withTransaction } from '../../utils/transaction.js';
 import { ensureCounter, nextDocumentNumber } from '../../services/numbering.service.js';
 import { startOfDay } from '../../services/fiscal.service.js';
-import { assertCanOrder } from '../suppliers/supplier.service.js';
+import { assertCanOrder, assertSupplierActive } from '../suppliers/supplier.service.js';
 import { rangeFilter } from '../sales/document.http.js';
 import { buildPurchaseLines, loadSupplier, purchaseLineBody } from './purchase.builder.js';
 import { addressesDto, orderAddresses } from './purchase.addresses.js';
 
 type Id = Types.ObjectId; type Lean = PurchaseOrderDoc & { _id: Id; createdAt?: Date };
-export const orderBody = z.object({ supplierAddressId: objectId.nullable().optional(), receivingWarehouseId: objectId.nullable().optional(), supplierId: objectId, orderDate: z.coerce.date().optional(), expectedDate: z.coerce.date().optional(), lines: z.array(purchaseLineBody).min(1).max(300), notes: z.string().trim().max(2000).optional() }).strict();
+export const orderBody = z.object({ supplierAddressId: objectId.nullable().optional(), receivingWarehouseId: objectId.nullable().optional(), supplierId: objectId, orderDate: z.coerce.date().optional(), expectedDate: z.coerce.date().optional(), lines: z.array(purchaseLineBody).min(1).max(300), notes: z.string().trim().max(2000).optional(),
+  /** Absent : conditions de la fiche fournisseur. */
+  paymentTerms: z.string().trim().max(500).optional() }).strict();
 type Body = z.infer<typeof orderBody>;
 
 export const toDto = (o: Lean) => ({
-  id: o._id.toString(), ...addressesDto(o), number: o.number, status: o.status, supplierId: o.supplierId.toString(), supplier: o.supplier, orderDate: o.orderDate, expectedDate: o.expectedDate ?? null, notes: o.notes ?? null, totals: o.totals,
+  id: o._id.toString(), ...addressesDto(o), number: o.number, status: o.status, supplierId: o.supplierId.toString(), supplier: o.supplier, orderDate: o.orderDate, expectedDate: o.expectedDate ?? null, notes: o.notes ?? null, paymentTerms: o.paymentTerms ?? null, totals: o.totals,
   lines: o.lines.map((l) => ({ id: (l as { _id: Id })._id.toString(), productId: l.productId?.toString() ?? null, reference: l.reference ?? null, designation: l.designation, unit: l.unit ?? null, quantity: l.quantity, unitPriceMinor: l.unitPriceMinor, discountPct: l.discountPct ?? 0,
     vat: l.vat, netHtMinor: l.netHtMinor, receivedQty: l.receivedQty ?? 0, invoicedQty: l.invoicedQty ?? 0, remainingQty: Math.max(0, l.quantity - (l.receivedQty ?? 0)) })),
   confirmedAt: o.confirmedAt ?? null, cancelReason: o.cancelReason ?? null, editable: o.status === 'draft', createdAt: o.createdAt });
@@ -36,10 +38,10 @@ export const get = async (c: Id, id: string) => toDto(await getOwn(c, id));
 export async function create(companyId: Id, userId: Id, b: Body) {
   const date = startOfDay(b.orderDate ?? new Date()); await ensureCounter(companyId, 'purchaseOrder', date);
   return withTransaction(async (session) => {
-    const sup = await loadSupplier(companyId, b.supplierId, session); const built = await buildPurchaseLines(companyId, b.lines, date, session, { checkStatus: true });
+    const sup = await loadSupplier(companyId, b.supplierId, session); assertSupplierActive(sup); const built = await buildPurchaseLines(companyId, b.lines, date, session, { checkStatus: true });
     const number = await nextDocumentNumber(companyId, 'purchaseOrder', session, date);
     const addresses = await orderAddresses(companyId, sup, b, session);
-    const [o] = await PurchaseOrder.create([{ ...addresses, companyId, number, supplierId: sup._id, supplier: { name: sup.name, taxId: sup.taxId }, orderDate: date, expectedDate: b.expectedDate, lines: built.lines, totals: built.totals, notes: b.notes, createdBy: userId }] as never[], { session });
+    const [o] = await PurchaseOrder.create([{ ...addresses, companyId, number, supplierId: sup._id, supplier: { name: sup.name, taxId: sup.taxId }, orderDate: date, expectedDate: b.expectedDate, lines: built.lines, totals: built.totals, notes: b.notes, paymentTerms: b.paymentTerms ?? sup.paymentTerms, createdBy: userId }] as never[], { session });
     return toDto(o!.toObject() as Lean);
   });
 }
@@ -47,9 +49,10 @@ export async function update(companyId: Id, id: string, b: Body) {
   const cur = await getOwn(companyId, id); if (cur.status !== 'draft') throw AppError.conflict('Seule une commande en brouillon est modifiable');
   const date = startOfDay(b.orderDate ?? cur.orderDate);
   return withTransaction(async (session) => {
-    const sup = await loadSupplier(companyId, b.supplierId, session); const built = await buildPurchaseLines(companyId, b.lines, date, session, { checkStatus: true });
+    const sup = await loadSupplier(companyId, b.supplierId, session); const changed = String(cur.supplierId) !== String(sup._id); if (changed) assertSupplierActive(sup);
+    const built = await buildPurchaseLines(companyId, b.lines, date, session, { checkStatus: true });
     const addresses = await orderAddresses(companyId, sup, b, session, String(cur.supplierId) === String(sup._id) ? cur : { receivingAddress: cur.receivingAddress });
-    const u = await PurchaseOrder.findOneAndUpdate({ _id: id, companyId, status: 'draft' }, { $set: { ...addresses, supplierId: sup._id, supplier: { name: sup.name, taxId: sup.taxId }, orderDate: date, expectedDate: b.expectedDate, lines: built.lines, totals: built.totals, notes: b.notes } }, { returnDocument: 'after', session }).lean();
+    const u = await PurchaseOrder.findOneAndUpdate({ _id: id, companyId, status: 'draft' }, { $set: { ...addresses, supplierId: sup._id, supplier: { name: sup.name, taxId: sup.taxId }, orderDate: date, expectedDate: b.expectedDate, lines: built.lines, totals: built.totals, notes: b.notes, paymentTerms: b.paymentTerms ?? (changed ? sup.paymentTerms : cur.paymentTerms) } }, { returnDocument: 'after', session }).lean();
     if (!u) throw AppError.conflict('La commande a changé entre-temps'); return toDto(u as Lean);
   });
 }

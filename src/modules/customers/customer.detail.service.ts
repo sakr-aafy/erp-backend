@@ -5,6 +5,7 @@ import { AppError } from '../../utils/errors.js';
 import { escapeRegex } from '../../utils/pagination.js';
 import { thirdPartyStatement } from '../accounting/accounting.service.js';
 import { getOwn, toDto } from './customer.service.js';
+import { expireOverdue as expireQuotations } from '../quotations/quotation.service.js';
 
 type Id = Types.ObjectId;
 export type DocKind = 'quotation' | 'proforma' | 'invoice' | 'credit_note' | 'delivery_note';
@@ -31,7 +32,7 @@ const toRow = (kind: DocKind, d: DocLean): Row => ({
 
 /** Statuts filtrables par type de document (un statut qui n'existe pas pour un type exclut ce type de la recherche). */
 const STATUSES: Record<DocKind, string[]> = {
-  quotation: ['pending', 'accepted', 'refused', 'expired'], proforma: ['pending', 'converted', 'expired', 'cancelled'],
+  quotation: ['pending', 'sent', 'accepted', 'refused', 'expired'], proforma: ['pending', 'converted', 'expired', 'cancelled'],
   invoice: ['draft', 'validated', 'unpaid', 'partial', 'paid'], credit_note: ['draft', 'validated'], delivery_note: ['draft', 'validated', 'cancelled'],
 };
 
@@ -56,6 +57,7 @@ export async function transactions(companyId: Id, customerId: string, perms: Per
   const allowed = allowedKinds(perms);
   if (q.type && !allowed.includes(q.type)) throw AppError.forbidden(`Permission requise : ${KIND_PERMISSION[q.type]}`);
   const kinds = q.type ? [q.type] : allowed;
+  if (kinds.includes('quotation')) await expireQuotations(companyId);
   const take = q.page * q.limit;
   const parts = await Promise.all(kinds.map(async (kind) => {
     const filter = kindFilter(kind, companyId, customerId, q); if (!filter) return { rows: [] as Row[], total: 0 };

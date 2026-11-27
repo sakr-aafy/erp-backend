@@ -102,12 +102,13 @@ type Input = Partial<{
 }>;
 
 /** `country` = pays du client : détermine l'indicatif des numéros saisis au format local. */
-function prepare(d: Input, country?: string | null) {
+function prepare(d: Input, country?: string | null, creating = false) {
   const out: Record<string, unknown> = { ...d };
   if ('taxId' in d) out.taxId = normalizeTaxId(d.taxId);
   for (const k of ['phone', 'secondaryPhone'] as const) if (d[k]) out[k] = normalizePhone(d[k], country);
   if (d.contacts) out.contacts = normalizeContacts(d.contacts.map((c) => withPhone(c as { phone?: string; isPrimary?: boolean }, country)));
-  if (d.social) for (const k of ['facebook', 'linkedin', 'instagram'] as const) if (d.social[k] == null) delete (out.social as Record<string, unknown>)[k];
+  // À la création, un réseau vide n'est pas enregistré ; à la modification, null efface la valeur
+  if (d.social && creating) out.social = Object.fromEntries(Object.entries(d.social).filter(([, v]) => v != null));
   return out;
 }
 
@@ -122,7 +123,7 @@ export async function create(companyId: Id, d: Input, actor: Actor = {}) {
   await ensureCounter(companyId, 'customer');
   const customer = await withTransaction(async (session) => {
     const code = await nextDocumentNumber(companyId, 'customer', session);
-    const [c] = await Customer.create([{ ...dropNulls(prepare(d, d.address?.country)), companyId, code, status: 'active' }], { session });
+    const [c] = await Customer.create([{ ...dropNulls(prepare(d, d.address?.country, true)), companyId, code, status: 'active' }], { session });
     await logAuto(companyId, c!._id, 'customer_created', 'Client créé', actor, { code }, session);
     return c!;
   });
