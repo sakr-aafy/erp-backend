@@ -18,4 +18,5 @@ const auditLogSchema = new Schema(
 auditLogSchema.index({ companyId: 1, at: -1 });
 auditLogSchema.index({ companyId: 1, resource: 1, resourceId: 1 });
 auditLogSchema.index({ companyId: 1, userId: 1, at: -1 });
+auditLogSchema.index({ companyId: 1, 'meta.refs': 1, at: -1 }); // chronologie du cycle commercial
 export const AuditLog = model('AuditLog', auditLogSchema);

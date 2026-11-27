@@ -12,7 +12,7 @@ export interface PdfDoc {
   customer: { name?: string | null | undefined; taxId?: string | null | undefined; address?: { street?: string | null | undefined; city?: string | null | undefined; postalCode?: string | null | undefined; country?: string | null | undefined } | null | undefined };
   /** « quotation » : colonnes du devis (Pos., Référence, …), remise affichée seulement si au moins une ligne en a, pages numérotées. */
   layout?: 'quotation';
-  lines: { position?: number | null | undefined; discountMinor?: number | null | undefined; reference?: string | null | undefined; designation: string; unit?: string | null | undefined; quantity: number; unitPriceMinor: number; discountPct?: number | null | undefined; netHtMinor?: number | null | undefined; vat: { code?: string | null | undefined; ratePct?: number | null | undefined; regime?: string | null | undefined } }[];
+  lines: { /** Traçabilité imprimée sous la désignation (BL d’origine, numéros de série). */ details?: string | undefined; position?: number | null | undefined; discountMinor?: number | null | undefined; reference?: string | null | undefined; designation: string; unit?: string | null | undefined; quantity: number; unitPriceMinor: number; discountPct?: number | null | undefined; netHtMinor?: number | null | undefined; vat: { code?: string | null | undefined; ratePct?: number | null | undefined; regime?: string | null | undefined } }[];
   totals: { grossMinor?: number | null | undefined; lineDiscountsMinor?: number | null | undefined; globalDiscountMinor?: number | null | undefined; totalHtMinor?: number | null | undefined;
     vatGroups?: { vatCode?: string | null | undefined; regime?: string | null | undefined; ratePct?: number | null | undefined; baseMinor?: number | null | undefined; vatMinor?: number | null | undefined }[] | null | undefined;
     totalVatMinor?: number | null | undefined; totalTtcMinor?: number | null | undefined; stampMinor?: number | null | undefined; withholdingMinor?: number | null | undefined; totalPayableMinor?: number | null | undefined };
@@ -23,7 +23,7 @@ export interface PdfDoc {
   deliveryTime?: string | null | undefined;
   /** Devis : numéro de la version imprimée. */
   version?: number | undefined;
-  /** Devis antérieur : remise globale en % appliquée au total, nommée comme telle au récapitulatif. */
+  /** Document antérieur : remise globale en % appliquée au total, nommée comme telle au récapitulatif. */
   legacyDiscountPct?: number | null | undefined;
   deliveryAddress?: { label?: string | null | undefined; street?: string | null | undefined; city?: string | null | undefined; postalCode?: string | null | undefined; country?: string | null | undefined;
     contactName?: string | null | undefined; contactPhone?: string | null | undefined; instructions?: string | null | undefined } | null | undefined;
@@ -89,11 +89,14 @@ export async function renderDocumentPdf(companyId: Types.ObjectId, d: PdfDoc): P
   };
   head();
   for (const l of d.lines) {
-    if (doc.y > doc.page.height - 200) { doc.addPage(); head(); }
+    const text = l.details ? `${l.designation}\n${l.details}` : l.designation;
+    // Une ligne et sa traçabilité ne sont jamais coupées entre deux pages
+    doc.font('Helvetica').fontSize(8.5); const need = doc.heightOfString(text, { width: cols[1]!.w - 6 });
+    if (doc.y > doc.page.height - 200 || doc.y + need > doc.page.height - 80) { doc.addPage(); head(); }
     const y = doc.y; let x = L;
     const vals = showPrices
-      ? [l.reference ?? '', l.designation, fr(l.quantity, 3), m(l.unitPriceMinor), l.discountPct ? fr(l.discountPct, 2) : '', l.vat.regime === 'taxable' ? `${l.vat.ratePct}%` : (REGIME[l.vat.regime ?? ''] ?? '—').replace('TVA ', ''), m(l.netHtMinor)]
-      : [l.reference ?? '', l.designation, l.unit ?? '', fr(l.quantity, 3)];
+      ? [l.reference ?? '', text, fr(l.quantity, 3), m(l.unitPriceMinor), l.discountPct ? fr(l.discountPct, 2) : '', l.vat.regime === 'taxable' ? `${l.vat.ratePct}%` : (REGIME[l.vat.regime ?? ''] ?? '—').replace('TVA ', ''), m(l.netHtMinor)]
+      : [l.reference ?? '', text, l.unit ?? '', fr(l.quantity, 3)];
     let h = 12;
     cols.forEach((c, i) => { const t = vals[i]!; const hh = doc.heightOfString(t, { width: c.w - 6 }); h = Math.max(h, hh); doc.text(t, x + 3, y, { width: c.w - 6, align: c.r ? 'right' : 'left' }); x += c.w; });
     doc.y = y + h + 4; doc.moveTo(L, doc.y - 2).lineTo(R, doc.y - 2).stroke('#e5e8ee');
@@ -108,9 +111,9 @@ export async function renderDocumentPdf(companyId: Types.ObjectId, d: PdfDoc): P
     doc.moveDown(0.6); const ty = doc.y; const tx = L + W - 230;
     const row = (k: string, v: string, bold = false) => { const y = doc.y; doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(bold ? 10 : 9).text(k, tx, y, { width: 130 }); doc.text(v, tx + 130, y, { width: 100, align: 'right' }); doc.y = y + (bold ? 15 : 13); };
     const t = d.totals;
-    // Devis : les remises de ligne et la remise supplémentaire sont présentées séparément
-    if (quote) { if ((t.lineDiscountsMinor ?? 0) > 0) row('Remises sur les lignes', `- ${m(t.lineDiscountsMinor)}`); if ((t.globalDiscountMinor ?? 0) > 0) row((d.legacyDiscountPct ?? 0) > 0 ? `Remise globale (${fr(d.legacyDiscountPct!, 2)} %)` : 'Remise supplémentaire', `- ${m(t.globalDiscountMinor)}`); }
-    else if ((t.lineDiscountsMinor ?? 0) + (t.globalDiscountMinor ?? 0) > 0) row('Remises', `- ${m((t.lineDiscountsMinor ?? 0) + (t.globalDiscountMinor ?? 0))}`);
+    // Les remises de ligne et la remise supplémentaire (répartie entre les factures partielles) sont présentées séparément
+    if ((t.lineDiscountsMinor ?? 0) > 0) row('Remises sur les lignes', `- ${m(t.lineDiscountsMinor)}`);
+    if ((t.globalDiscountMinor ?? 0) > 0) row((d.legacyDiscountPct ?? 0) > 0 ? `Remise globale (${fr(d.legacyDiscountPct!, 2)} %)` : 'Remise supplémentaire', `- ${m(t.globalDiscountMinor)}`);
     row('Total HT', m(t.totalHtMinor));
     for (const g of t.vatGroups ?? []) row(g.regime === 'taxable' ? `TVA ${g.ratePct} % (base ${m(g.baseMinor)})` : `${REGIME[g.regime ?? ''] ?? g.vatCode} (base ${m(g.baseMinor)})`, g.regime === 'taxable' ? m(g.vatMinor) : '—');
     row('Total TVA', m(t.totalVatMinor)); row('Total TTC', m(t.totalTtcMinor), true);

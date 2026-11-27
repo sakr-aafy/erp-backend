@@ -20,8 +20,21 @@ export const lineSchema = new Schema(
     deliveredQty: { type: Number, default: 0 },
     /** Ligne du document source (BL → ligne de devis/proforma/facture ; avoir → ligne de la facture créditée). */
     sourceLineId: Schema.Types.ObjectId,
-    /** BL : numéros de série livrés (articles suivis par série). */
+    /** BL : numéros de série livrés (articles suivis par série) ; repris sur les lignes de facture issues de ces BL. */
     serials: { type: [String], default: undefined },
+    // ---- Cycle commercial (aucune valeur par défaut : absent des documents qui ne l'utilisent pas) ----
+    /** Quantité affectée à des factures (brouillons et validées), nette des corrections : réservation atomique contre la double facturation. */
+    allocatedQty: Number,
+    /** Quantité facturée par des factures VALIDÉES, nette des corrections. */
+    invoicedQty: Number,
+    /** Quantité physiquement retournée (BL) ou retournée au total (ligne source). */
+    returnedQty: Number,
+    /** Ligne « base de prix » : montants déjà affectés à des factures (net après toutes remises, part de remise globale, remise de ligne). */
+    billedAfterMinor: Number, billedShareMinor: Number, billedDiscountMinor: Number,
+    /** BL : numéros de série affectés à une facture. */
+    billedSerials: { type: [String], default: undefined },
+    /** Ligne de facture (ou d'avoir) issue d'un BL : livraison et ligne de prix d'origine. */
+    delivery: { type: new Schema({ noteId: Schema.Types.ObjectId, noteNumber: String, lineId: Schema.Types.ObjectId, basisType: { type: String, enum: ['proforma', 'quotation', 'deliveryNote'] }, basisId: Schema.Types.ObjectId, basisLineId: Schema.Types.ObjectId }, { _id: false }) },
   },
   { _id: true },
 );
@@ -49,6 +62,8 @@ const commonDoc = {
   globalDiscountMinor: { type: Number, default: 0 },
   withholdingOperationType: String, withholding: withholdingSchema, stamp: stampSchema, totals: { type: totalsSchema, required: true },
   notes: { type: String, trim: true }, createdBy: oid('User'), sentAt: Date,
+  /** Compteur des écritures du cycle (livraisons, facturation, annulation) : refus des écritures concurrentes. */
+  cycleRevision: Number,
   /** Copie de l'adresse de livraison choisie (null : aucune ; absent : document antérieur, voir customerSnapshot.shippingAddress). */
   deliveryAddress: { type: addressSnapshotSchema },
 };
@@ -160,10 +175,14 @@ export const QuotationComment = model('QuotationComment', quotationCommentSchema
 const proformaSchema = new Schema({
   ...commonDoc, ...paymentTermsFields, number: { type: String, required: true }, issueDate: { type: Date, required: true }, validUntil: { type: Date, required: true },
   status: { type: String, enum: ['pending', 'converted', 'expired', 'cancelled'], default: 'pending' },
-  quotationId: oid('Quotation'), invoiceId: oid('Invoice'), terms: { type: String, trim: true }, cancelledAt: Date,
+  quotationId: oid('Quotation'), invoiceId: oid('Invoice'), terms: { type: String, trim: true }, cancelledAt: Date, cancelledBy: oid('User'), cancelledByName: String, cancelReason: String,
   /** Version du devis acceptée et convertie. */
-  quotationVersion: Number,
+  quotationVersion: Number, quotationNumber: String,
   deliveryTime: { type: String, trim: true },
+  /** Transmission au client (e-mail ou remise notée) : « Envoyée ». */
+  sentByName: String, sentTo: String, sentMethod: String,
+  /** Document issu de l'ancien parcours (converti directement en facture). */
+  legacyFlow: Boolean,
 }, { timestamps: true });
 proformaSchema.index({ companyId: 1, number: 1 }, { unique: true });
 proformaSchema.index({ companyId: 1, status: 1, validUntil: 1 });
@@ -186,7 +205,14 @@ const invoiceSchema = new Schema({
   paymentStatus: { type: String, enum: ['unpaid', 'partial', 'paid'], default: 'unpaid' },
   creditedInvoiceId: oid('Invoice'), creditReason: String,
   quotationId: oid('Quotation'), proformaId: oid('Proforma'), deliveryNoteIds: [oid('DeliveryNote')],
-  validatedAt: Date, validatedBy: oid('User'),
+  validatedAt: Date, validatedBy: oid('User'), validatedByName: String,
+  /** « delivery » : lignes issues de BL, quantités et montants affectés par le serveur (non modifiables). Absent : saisie directe ou ancien parcours. */
+  origin: { type: String, enum: ['delivery'] },
+  /** Références imprimées de la chaîne commerciale, copiées à la création. */
+  sourceRefs: { type: new Schema({ quotationNumber: String, quotationVersion: Number, proformaNumber: String }, { _id: false }) },
+  /** Avoir : effet sur les quantités. « financial » : aucun ; « return » : retour physique attendu ; « billing_correction » : quantités à refacturer. */
+  creditEffect: { type: String, enum: ['financial', 'return', 'billing_correction'] },
+  legacyFlow: Boolean,
 }, { timestamps: true });
 invoiceSchema.index({ companyId: 1, type: 1, number: 1 }, { unique: true, partialFilterExpression: { number: { $type: 'string' } } });
 invoiceSchema.index({ companyId: 1, status: 1, issueDate: -1 });
@@ -195,6 +221,9 @@ invoiceSchema.index({ companyId: 1, customerId: 1, issueDate: -1 }); // fiche cl
 invoiceSchema.index({ companyId: 1, paymentStatus: 1, 'schedule.dueDate': 1 });
 invoiceSchema.index({ companyId: 1, creditedInvoiceId: 1 });
 invoiceSchema.index({ companyId: 1, 'lines.productId': 1 });
+invoiceSchema.index({ companyId: 1, proformaId: 1 });
+invoiceSchema.index({ companyId: 1, quotationId: 1 });
+invoiceSchema.index({ companyId: 1, deliveryNoteIds: 1 });
 export type InvoiceDoc = InferSchemaType<typeof invoiceSchema>;
 export const Invoice = model('Invoice', invoiceSchema);
 
@@ -216,20 +245,33 @@ export type PaymentDoc = InferSchemaType<typeof paymentSchema>;
 export const Payment = model('Payment', paymentSchema);
 
 // ---- Bon de livraison ----
+/** Retour physique de marchandise livrée : réintégration au stock confirmée par l'utilisateur. Ajout seul. */
+const returnSchema = new Schema({
+  /** Clé fournie par l'appelant : une requête rejouée ne crée pas un second retour. */
+  requestId: String, date: { type: Date, required: true }, warehouseId: oid('Warehouse'), reason: { type: String, required: true }, userId: oid('User'), userName: String,
+  lines: [new Schema({ lineId: Schema.Types.ObjectId, quantity: Number, serials: { type: [String], default: undefined },
+    /** Part déjà facturée puis créditée (avoir « retour ») : quantités et montants rouverts. */
+    credited: [new Schema({ creditNoteId: Schema.Types.ObjectId, invoiceId: Schema.Types.ObjectId, invoiceLineId: Schema.Types.ObjectId, quantity: Number, afterMinor: Number, shareMinor: Number, discountMinor: Number }, { _id: false })] }, { _id: false })],
+}, { timestamps: { createdAt: true, updatedAt: false } });
 const deliveryNoteSchema = new Schema({
   ...commonDoc, number: { type: String, required: true }, deliveryDate: { type: Date, required: true }, carrier: { type: String, trim: true },
   status: { type: String, enum: ['draft', 'validated', 'cancelled'], default: 'draft' },
   source: { type: new Schema({ type: { type: String, enum: ['quotation', 'proforma', 'invoice'] }, id: Schema.Types.ObjectId, number: String }, { _id: false }) },
   /** Renseigné dès qu'une facture (brouillon ou validée) est créée depuis ce BL : il n'est alors plus annulable. */
   invoiceId: oid('Invoice'), validatedAt: Date, validatedBy: oid('User'), cancelledAt: Date, cancelReason: String,
-  /** Magasin de sortie du stock (choisi à la validation, sinon magasin par défaut). */
+  /** Magasin de sortie du stock (choisi à la saisie ou à la validation, sinon magasin par défaut). */
   warehouseId: oid('Warehouse'),
+  /** Factures portant au moins une quantité de ce BL. */
+  invoiceIds: { type: [oid('Invoice')], default: undefined },
+  validatedByName: String, cancelledBy: oid('User'), cancelledByName: String,
+  returns: { type: [returnSchema], default: undefined }, legacyFlow: Boolean,
 }, { timestamps: true });
 deliveryNoteSchema.index({ companyId: 1, number: 1 }, { unique: true });
 deliveryNoteSchema.index({ companyId: 1, status: 1, deliveryDate: -1 });
 deliveryNoteSchema.index({ companyId: 1, customerId: 1, status: 1 });
 deliveryNoteSchema.index({ companyId: 1, customerId: 1, deliveryDate: -1 }); // fiche client : historique par date
 deliveryNoteSchema.index({ companyId: 1, 'source.id': 1 });
+deliveryNoteSchema.index({ companyId: 1, invoiceIds: 1 });
 deliveryNoteSchema.index({ companyId: 1, 'lines.productId': 1 });
 export type DeliveryNoteDoc = InferSchemaType<typeof deliveryNoteSchema>;
 export const DeliveryNote = model('DeliveryNote', deliveryNoteSchema);

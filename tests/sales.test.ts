@@ -123,27 +123,26 @@ describe('factures proforma', () => {
     expect(txt).toContain('FACTURE PROFORMA'); expect(txt.split('\n')).toContain('PROFORMA'); // mention obligatoire sur le document édité
     expect(txt).toContain(p.body.number);
   });
-  it('conversion en facture : proforma convertie, facture brouillon liée, pas de double conversion', async () => {
+  it('aucune conversion directe en facture : la proforma se livre, puis le BL se facture', async () => {
     const p = (await A.j.post('/proformas', quoteBody(A, [line(A.products.a19, 2)]))).body;
-    const c = await A.j.post(`/proformas/${p.id}/convert-invoice`); expect(c.status).toBe(201);
-    expect((await A.j.get(`/proformas/${p.id}`)).body).toMatchObject({ status: 'converted', invoiceId: c.body.invoiceId, editable: false });
-    const inv = (await A.j.get(`/invoices/${c.body.invoiceId}`)).body;
-    expect(inv).toMatchObject({ status: 'draft', number: null, proformaId: p.id }); expect(inv.totals.totalTtcMinor).toBe(238_000);
-    expect((await A.j.post(`/proformas/${p.id}/convert-invoice`)).status).toBe(409);
+    const c = await A.j.post(`/proformas/${p.id}/convert-invoice`); expect(c.status).toBe(410); expect(c.body.error.code).toBe('CONVERSION_REMOVED');
+    expect((await A.j.get(`/proformas/${p.id}`)).body).toMatchObject({ status: 'pending', invoiceId: null, editable: true, deliveryState: 'none', billingState: 'none' });
+    const bl = (await A.j.post('/delivery-notes', { source: { type: 'proforma', id: p.id }, lines: [{ sourceLineId: p.lines[0].id, quantity: 2 }] })).body;
+    expect((await A.j.get(`/proformas/${p.id}`)).body.editable).toBe(false); // un BL en préparation fige la proforma
     expect((await A.j.put(`/proformas/${p.id}`, quoteBody(A, [line(A.products.a19)]))).status).toBe(409);
     expect((await A.j.del(`/proformas/${p.id}`)).status).toBe(409);
-    // supprimer le brouillon de facture libère la proforma
-    expect((await A.j.del(`/invoices/${c.body.invoiceId}`)).status).toBe(204);
-    expect((await A.j.get(`/proformas/${p.id}`)).body).toMatchObject({ status: 'pending', invoiceId: null });
+    expect((await A.j.del(`/delivery-notes/${bl.id}`)).status).toBe(204);
+    expect((await A.j.get(`/proformas/${p.id}`)).body.editable).toBe(true);
   });
   it('annulation, expiration, statistiques', async () => {
     const p = (await A.j.post('/proformas', quoteBody(A, [line(A.products.a19)]))).body;
-    expect((await A.j.post(`/proformas/${p.id}/cancel`)).body.status).toBe('cancelled');
-    expect((await A.j.post(`/proformas/${p.id}/convert-invoice`)).status).toBe(409);
+    expect((await A.j.post(`/proformas/${p.id}/cancel`)).status).toBe(422); // motif obligatoire
+    expect((await A.j.post(`/proformas/${p.id}/cancel`, { reason: 'Commande annulée' })).body).toMatchObject({ status: 'cancelled', cancelReason: 'Commande annulée' });
+    const refused = await A.j.post('/delivery-notes', { source: { type: 'proforma', id: p.id }, lines: [{ sourceLineId: p.lines[0].id, quantity: 1 }] }); expect(refused.status).toBe(409);
     const e = (await A.j.post('/proformas', quoteBody(A, [line(A.products.a19)]))).body;
     const { Proforma } = await import('../src/models/sales.model.js'); await Proforma.updateOne({ _id: e.id }, { validUntil: new Date(Date.now() - 2 * 86400000) });
-    expect((await A.j.get(`/proformas/${e.id}`)).body.status).toBe('expired'); expect((await A.j.post(`/proformas/${e.id}/convert-invoice`)).status).toBe(409);
-    const s = (await A.j.get('/proformas/stats')).body; expect(s.cancelled).toBe(1); expect(s.expired).toBe(1); expect(s.converted).toBeGreaterThanOrEqual(0);
+    expect((await A.j.get(`/proformas/${e.id}`)).body.status).toBe('expired'); expect((await A.j.post('/delivery-notes', { source: { type: 'proforma', id: e.id }, lines: [{ sourceLineId: e.lines[0].id, quantity: 1 }] })).status).toBe(409);
+    const s = (await A.j.get('/proformas/stats')).body; expect(s.cancelled).toBe(1); expect(s.expired).toBe(1); expect(s.converted).toBe(0);
   });
 });
 

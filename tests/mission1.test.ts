@@ -278,7 +278,10 @@ describe('remises', () => {
     await Quotation.updateOne({ _id: q.id }, legacy); await Quotation.updateOne({ _id: q.id }, { status: 'accepted', acceptedVersion: 1 });
     const pf = (await A.j.post(`/quotations/${q.id}/convert-proforma`, {})).body; const p = (await Proforma.findById(pf.proformaId).lean())!;
     expect(p.totals.totalHtMinor).toBe(189_981); expect(p.globalDiscountPct).toBe(5); expect(p.lines[0]!.discountPct).toBe(0.01);
-    const inv = (await A.j.post(`/proformas/${pf.proformaId}/convert-invoice`)).body; expect((await Invoice.findById(inv.invoiceId))!.totals.totalHtMinor).toBe(189_981);
+    // la facture issue du BL reprend les montants convenus, ancienne remise comprise, au millime
+    const note = (await A.j.post('/delivery-notes', { source: { type: 'proforma', id: pf.proformaId }, lines: [{ sourceLineId: String(p.lines[0]!._id), quantity: p.lines[0]!.quantity }] })).body;
+    expect((await A.j.post(`/delivery-notes/${note.id}/validate`, { allowNegativeStock: true })).status).toBe(200);
+    const inv = (await A.j.post('/invoices/from-delivery-notes', { deliveryNoteIds: [note.id] })).body; expect((await Invoice.findById(inv.id))!.totals.totalHtMinor).toBe(189_981); expect(inv.globalDiscountPct).toBe(5);
     const dupQ = await quote([line(A.products.a19, 2)]); await Quotation.updateOne({ _id: dupQ.id }, { globalDiscountPct: 5 });
     const removed = await A.j.put(`/quotations/${dupQ.id}`, edit(await getQ(dupQ.id), { removeLegacyDiscount: true, syncDiscountPct: 10 })); expect(removed.body).toMatchObject({ globalDiscountPct: 0, syncDiscountPct: 10 }); expect(removed.body.totals.totalHtMinor).toBe(180_000);
   });

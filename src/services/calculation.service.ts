@@ -21,6 +21,9 @@ export interface CalcLine {
   vatRatePct: number;          // ignoré si le régime n'est pas « taxable »
   /** Avoirs : net HT imposé (après toutes remises), calculé par le builder d'avoir à partir de la facture d'origine. */
   netHtOverrideMinor?: number;
+  /** Facturation de livraisons : brut et part de remise globale affectés à la ligne (prorata du document source, au millime). */
+  grossOverrideMinor?: number;
+  globalShareOverrideMinor?: number;
 }
 export interface CalcInput {
   lines: CalcLine[];
@@ -89,10 +92,12 @@ export function computeDocument(input: CalcInput): CalcResult {
   }
   const lines: CalcLineResult[] = input.lines.map((l, i) => {
     assertLine(l, i);
-    const grossMinor = mulQty(l.unitPriceMinor, l.quantity);
+    const grossMinor = l.grossOverrideMinor ?? mulQty(l.unitPriceMinor, l.quantity);
     if (l.netHtOverrideMinor !== undefined) {
       if (!Number.isInteger(l.netHtOverrideMinor) || l.netHtOverrideMinor < 0) throw new CalculationError(`Ligne ${i + 1} : montant net invalide`);
-      return { grossMinor, discountMinor: Math.max(0, grossMinor - l.netHtOverrideMinor), netHtMinor: l.netHtOverrideMinor, globalShareMinor: 0 };
+      const share = l.globalShareOverrideMinor ?? 0;
+      if (!Number.isInteger(share) || share < 0 || share > l.netHtOverrideMinor) throw new CalculationError(`Ligne ${i + 1} : part de remise invalide`);
+      return { grossMinor, discountMinor: Math.max(0, grossMinor - l.netHtOverrideMinor), netHtMinor: l.netHtOverrideMinor, globalShareMinor: share };
     }
     const discountMinor = pctOf(grossMinor, l.discountPct ?? 0);
     return { grossMinor, discountMinor, netHtMinor: grossMinor - discountMinor, globalShareMinor: 0 };
@@ -111,7 +116,13 @@ export function computeDocument(input: CalcInput): CalcResult {
 
   let globalDiscount = 0;
   let perGroup: number[];
-  if ((input.globalDiscountPct ?? 0) > 0) {
+  // Parts de remise déjà affectées ligne par ligne : jamais réparties ni appliquées une seconde fois
+  const fixed = input.lines.some((l) => l.globalShareOverrideMinor !== undefined);
+  if (fixed && ((input.globalDiscountPct ?? 0) > 0 || (input.globalDiscountMinor ?? 0) > 0)) throw new CalculationError('Remise globale déjà affectée aux lignes');
+  if (fixed) {
+    perGroup = list.map((g) => g.idx.reduce((s, i) => s + lines[i]!.globalShareMinor, 0));
+    globalDiscount = perGroup.reduce((s, v) => s + v, 0);
+  } else if ((input.globalDiscountPct ?? 0) > 0) {
     if (input.globalDiscountPct! > 100) throw new CalculationError('Remise globale : maximum 100 %');
     perGroup = list.map((g) => pctOf(g.base, input.globalDiscountPct!));
     globalDiscount = perGroup.reduce((s, v) => s + v, 0);
@@ -123,7 +134,7 @@ export function computeDocument(input: CalcInput): CalcResult {
   } else perGroup = list.map(() => 0);
 
   // Imputation de la remise globale de chaque groupe aux lignes du groupe (plus fort reste) : somme exacte
-  list.forEach((g, gi) => { const shares = allocateProportional(perGroup[gi]!, g.idx.map((i) => lines[i]!.netHtMinor)); g.idx.forEach((i, k) => { lines[i]!.globalShareMinor = shares[k]!; }); });
+  if (!fixed) list.forEach((g, gi) => { const shares = allocateProportional(perGroup[gi]!, g.idx.map((i) => lines[i]!.netHtMinor)); g.idx.forEach((i, k) => { lines[i]!.globalShareMinor = shares[k]!; }); });
   const vatGroups: VatGroup[] = list.map((g, i) => {
     const baseMinor = g.base - perGroup[i]!;
     const forced = input.vatOverrides?.[groupKey(g.vatCode, g.regime, g.ratePct)];

@@ -61,6 +61,8 @@ export interface BuiltLine {
   productId?: Id; reference?: string | undefined; designation: string; description?: string | undefined; unit?: string | undefined; kind: 'product' | 'service';
   quantity: number; unitPriceMinor: number; discountPct: number; vat: { ruleId: Id; code: string; regime: VatRegime; ratePct: number };
   grossMinor: number; discountMinor: number; netHtMinor: number; globalShareMinor: number; deliveredQty: number; sourceLineId?: Id | string | undefined; serials?: string[] | undefined;
+  /** Facture ou avoir issu d’un BL : livraison et ligne base de prix (fixé par le serveur, jamais saisi). */
+  delivery?: unknown;
 }
 export interface BuiltDocument {
   customer: { _id: Id; name: string; taxId?: string | null | undefined; address?: unknown; paymentDelayDays?: number | null | undefined };

@@ -1,4 +1,4 @@
-import { Types, type QueryFilter } from 'mongoose';
+import { Types, type ClientSession, type QueryFilter } from 'mongoose';
 import { Quotation, Proforma, DeliveryNote, QuotationComment, QuotationDocument, QuotationVersion, type QuotationDoc } from '../../models/sales.model.js';
 import { AppError } from '../../utils/errors.js';
 import { buildSort, escapeRegex } from '../../utils/pagination.js';
@@ -12,6 +12,11 @@ import { pdfOf } from '../sales/document.pdf.js';
 import { assertQuantities } from '../products/units.js';
 import { deleteFile, QUOTATION_BUCKET } from '../customers/customer.files.js';
 import * as activity from './quotation.activity.js';
+import { logCycle } from '../sales/cycle.log.js';
+import { Customer } from '../../models/customer.model.js';
+import { Product } from '../../models/product.model.js';
+import { effectiveStatus as customerStatus, STATUS_LABEL as CUSTOMER_STATUS_LABEL } from '../customers/customer.service.js';
+import { effectiveStatus as productStatus, STATUS_LABEL as PRODUCT_STATUS_LABEL } from '../products/product.service.js';
 import { SYSTEM, type Actor } from './quotation.activity.js';
 import * as versions from './quotation.version.js';
 import { actionsOf, assertTransition, QUOTATION_STATUSES, QUOTATION_STATUS_LABEL, statusOf, storedStatuses, type QuotationStatus } from './quotation.workflow.js';
@@ -233,26 +238,28 @@ export async function markSent(companyId: Id, id: string, actor: Actor, d: { met
 /** Changement de statut d'une version envoyée : transition contrôlée, version et événement dans la même transaction. */
 async function transition(companyId: Id, id: string, to: QuotationStatus, set: Record<string, unknown>, event: Omit<activity.Event, 'valueType' | 'oldValue' | 'newValue'>, actor: Actor) {
   await getOwn(companyId, id);
-  return withTransaction(async (session) => {
-    const q = (await Quotation.findOne({ _id: id, companyId }).session(session).lean()) as Lean;
-    const from = statusOf(q.status); assertTransition(from, to);
-    if (busy(q)) throw AppError.conflict('Envoi en cours : réessayez dans un instant');
-    const version = q.version ?? 1;
-    const u = await Quotation.findOneAndUpdate({ _id: id, companyId, status: q.status }, { $set: { status: to, ...set, ...(to === 'accepted' && { acceptedVersion: version }) } }, { returnDocument: 'after', session }).lean();
-    if (!u) throw concurrent();
-    await versions.freeze(q, to, { session, origin: 'migration' });
-    await versions.setVersionStatus(companyId, q._id, version, to, session);
-    await activity.record(companyId, q._id, [{ ...event, description: [`Version ${version}`, event.description].filter(Boolean).join(' — '), valueType: 'text', oldValue: QUOTATION_STATUS_LABEL[from], newValue: QUOTATION_STATUS_LABEL[to] }], actor, session);
-    return toDto(u as Lean);
-  });
+  return withTransaction((session) => applyTransition(session, companyId, id, to, set, event, actor));
+}
+async function applyTransition(session: ClientSession, companyId: Id, id: string, to: QuotationStatus, set: Record<string, unknown>, event: Omit<activity.Event, 'valueType' | 'oldValue' | 'newValue'>, actor: Actor) {
+  const q = (await Quotation.findOne({ _id: id, companyId }).session(session).lean()) as Lean;
+  const from = statusOf(q.status); assertTransition(from, to);
+  if (busy(q)) throw AppError.conflict('Envoi en cours : réessayez dans un instant');
+  const version = q.version ?? 1;
+  const u = await Quotation.findOneAndUpdate({ _id: id, companyId, status: q.status }, { $set: { status: to, ...set, ...(to === 'accepted' && { acceptedVersion: version }) } }, { returnDocument: 'after', session }).lean();
+  if (!u) throw concurrent();
+  await versions.freeze(q, to, { session, origin: 'migration' });
+  await versions.setVersionStatus(companyId, q._id, version, to, session);
+  await activity.record(companyId, q._id, [{ ...event, description: [`Version ${version}`, event.description].filter(Boolean).join(' — '), valueType: 'text', oldValue: QUOTATION_STATUS_LABEL[from], newValue: QUOTATION_STATUS_LABEL[to] }], actor, session);
+  return toDto(u as Lean);
 }
 export const accept = (c: Id, id: string, actor: Actor = {}, comment?: string) =>
   transition(c, id, 'accepted', { acceptedAt: new Date(), acceptedBy: actor.userId, acceptedByName: actor.name, ...(comment && { acceptanceNote: comment }) }, { kind: 'accepted', description: comment }, actor);
 export const refuse = (c: Id, id: string, actor: Actor = {}, reason?: string) =>
   transition(c, id, 'refused', { refusedAt: new Date(), refusedBy: actor.userId, refusedByName: actor.name, ...(reason && { refusalReason: reason }) }, { kind: 'refused', description: reason ? `Motif : ${reason}` : undefined }, actor);
-/** Annulation d'un devis accepté. Sans route : sera déclenchée par l'annulation de la proforma liée (mission 2). */
-export const cancel = (c: Id, id: string, actor: Actor = {}, reason?: string) =>
-  transition(c, id, 'cancelled', { cancelledAt: new Date(), ...(reason && { cancelReason: reason }) }, { kind: 'cancelled', description: reason ? `Motif : ${reason}` : undefined }, actor);
+/** Annulation d'un devis accepté : sans route, déclenchée par l'annulation de la proforma liée, dans sa transaction. */
+export const cancelWithin = (session: ClientSession, c: Id, id: string, actor: Actor = {}, reason?: string) =>
+  applyTransition(session, c, id, 'cancelled', { cancelledAt: new Date(), ...(reason && { cancelReason: reason }) }, { kind: 'cancelled', description: reason ? `Motif : ${reason}` : undefined }, actor);
+export const cancel = async (c: Id, id: string, actor: Actor = {}, reason?: string) => { await getOwn(c, id); return withTransaction((session) => cancelWithin(session, c, id, actor, reason)); };
 
 // ---------- Versions ----------
 const SENDING = { sentAt: 1, sentBy: 1, sentByName: 1, sentTo: 1, sentMethod: 1, expiredAt: 1, sendingUntil: 1 } as const;
@@ -344,7 +351,10 @@ export async function duplicate(companyId: Id, userId: Id, id: string, actor: Ac
     withholdingOperationType: src.withholdingOperationType ?? undefined, issueDate: today, validUntil: new Date(today.getTime() + days * DAY), notes: src.notes ?? undefined, terms: src.terms ?? undefined, deliveryTime: src.deliveryTime ?? undefined }, actor, src);
 }
 
-/** Devis ACCEPTÉ → proforma (seule conversion possible), rattachée à la version acceptée. */
+/**
+ * Devis ACCEPTÉ → proforma (seule conversion possible) : COPIE de la version acceptée (client, adresse, lignes, prix, remises, TVA,
+ * conditions, délai, totaux, devise). Rien n'est relu dans les référentiels ; chaque ligne garde le lien avec sa ligne de devis.
+ */
 export async function convertToProforma(companyId: Id, userId: Id, id: string, validUntil?: Date, actor: Actor = { userId }) {
   await expireOverdue(companyId);
   await ensureCounter(companyId, 'proforma', startOfDay(new Date()));
@@ -357,16 +367,34 @@ export async function convertToProforma(companyId: Id, userId: Id, id: string, v
     const today = startOfDay(new Date());
     const days = Math.max(1, Math.round((q.validUntil.getTime() - q.issueDate.getTime()) / DAY));
     const version = q.acceptedVersion ?? q.version ?? 1;
-    const doc = await buildDocument(companyId, 'proforma', { customerId: q.customerId, lines: linesToInput(q.lines), ...discountsOf(q), withholdingOperationType: q.withholdingOperationType }, { date: today, session, inherit: inheritFrom(q, q.customerId)!, preserveQuantities: true });
+    const record = await QuotationVersion.findOne({ companyId, quotationId: q._id, version }).session(session).lean();
+    const s = (record?.snapshot ?? await versions.snapshotOf(q, session)) as Record<string, any>;
+    await assertStillSellable(companyId, s.customerId, s.lines ?? [], session);
+    const lines = (s.lines as Record<string, any>[]).map((l) => { const { _id, deliveredQty: _d, ...copy } = l; return { ...copy, sourceLineId: _id, deliveredQty: 0 }; });
     const number = await nextDocumentNumber(companyId, 'proforma', session, today);
-    const [p] = await Proforma.create([{ companyId, number, customerId: doc.customer._id, customerSnapshot: doc.customerSnapshot, issueDate: today, validUntil: validUntil ? startOfDay(validUntil) : new Date(today.getTime() + days * DAY),
-      lines: doc.lines, globalDiscountPct: doc.globalDiscountPct, syncDiscountPct: doc.syncDiscountPct, globalDiscountMinor: doc.globalDiscountMinor, withholdingOperationType: doc.withholdingOperationType, withholding: doc.withholding, stamp: doc.stamp,
-      totals: doc.totals, quotationId: q._id, quotationVersion: version, deliveryTime: q.deliveryTime, notes: q.notes, terms: q.terms, ...frozenOf(doc), createdBy: userId }] as never[], { session });
+    const [p] = await Proforma.create([{ companyId, number, customerId: s.customerId, customerSnapshot: s.customerSnapshot, issueDate: today, validUntil: validUntil ? startOfDay(validUntil) : new Date(today.getTime() + days * DAY),
+      lines, globalDiscountPct: s.globalDiscountPct ?? 0, syncDiscountPct: s.syncDiscountPct ?? 0, globalDiscountMinor: s.globalDiscountMinor ?? 0, withholdingOperationType: s.withholdingOperationType, withholding: s.withholding, stamp: s.stamp,
+      totals: s.totals, quotationId: q._id, quotationNumber: q.number, quotationVersion: version, deliveryTime: s.deliveryTime, notes: s.notes, terms: s.terms, paymentTerms: s.paymentTerms, paymentTermsCustom: s.paymentTermsCustom,
+      ...(s.deliveryAddress !== undefined && { deliveryAddress: s.deliveryAddress }), createdBy: userId }] as never[], { session });
     const u = await Quotation.updateOne({ _id: q._id, companyId, status: 'accepted', proformaId: null, invoiceId: null }, { $set: { proformaId: p!._id } }, { session });
     if (!u.modifiedCount) throw concurrent();
     await activity.record(companyId, q._id, [{ kind: 'converted_proforma', related: { type: 'proforma', id: p!._id, number }, description: `Version ${version} → proforma ${number}`, eventKey: `proforma:${p!._id}` }], actor, session);
+    await logCycle(session, companyId, actor, [{ action: 'quote_converted', resourceId: q._id, number: q.number, refs: [p!._id], description: `Version ${version} → proforma ${number}` },
+      { action: 'proforma_created', resourceId: p!._id, number, refs: [q._id], description: `Depuis le devis ${q.number}, version ${version}` }]);
     return { proformaId: p!._id.toString(), number, quotationVersion: version };
   });
+}
+/** La commande ne peut naître que pour un client et des articles encore vendables. */
+async function assertStillSellable(companyId: Id, customerId: Id, lines: { productId?: Id }[], session: ClientSession) {
+  const c = await Customer.findOne({ _id: customerId, companyId }).session(session).lean();
+  if (!c) throw AppError.badRequest('Client invalide');
+  const st = customerStatus(c);
+  if (st !== 'active') throw new AppError(409, `Client ${CUSTOMER_STATUS_LABEL[st].toLowerCase()} : impossible de créer un document`, `CUSTOMER_${st.toUpperCase()}`);
+  const ids = lines.map((l) => l.productId).filter(Boolean) as Id[];
+  for (const p of await Product.find({ _id: { $in: ids }, companyId }).session(session).lean()) {
+    const s = productStatus(p);
+    if (s !== 'active') throw new AppError(409, `L’article « ${p.reference} » est ${PRODUCT_STATUS_LABEL[s].toLowerCase()} : vente impossible`, `PRODUCT_${s.toUpperCase()}`);
+  }
 }
 
 /** Compteurs réels par statut, montants et taux de transformation. */

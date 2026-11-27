@@ -135,7 +135,7 @@ describe('intégration : bon de livraison → sortie de stock', () => {
     const v = await A.j.post(`/delivery-notes/${bl.id}/validate`, { warehouseId: A.w1 }); expect(v.status, JSON.stringify(v.body)).toBe(200);
     expect(await levelOf(A, P)).toEqual({ qty: 6, value: 36_000 }); const m = (await StockMovement.findOne({ 'source.id': bl.id, reason: 'delivery' }))!; expect(m).toMatchObject({ direction: 'out', quantity: 4, valueMinor: 24_000, unitCostMinor: 6_000 });
     expect((await DeliveryNote.findById(bl.id))!.warehouseId!.toString()).toBe(A.w1);
-    const c = await A.j.post(`/delivery-notes/${bl.id}/cancel`, { reason: 'Erreur de livraison' }); expect(c.status).toBe(200);
+    const c = await A.j.post(`/delivery-notes/${bl.id}/cancel`, { reason: 'Erreur de livraison', returnConfirmed: true }); expect(c.status).toBe(200);
     expect(await levelOf(A, P)).toEqual({ qty: 10, value: 60_000 }); expect(await StockMovement.countDocuments({ 'source.id': bl.id })).toBe(2);
   });
   it('stock insuffisant : la validation du BL est refusée EN ENTIER (BL reste brouillon, aucun mouvement)', async () => {
@@ -214,11 +214,11 @@ describe('numéros de série', () => {
     expect((await stockIn(A, S, 1, 50_000, A.w1, { serials: ['SN-1'] })).status).toBe(409); // déjà enregistré
     expect((await A.j.post('/stock/movements', { direction: 'in', productId: S, warehouseId: A.w1, quantity: 1.5, unitCostMinor: 1, reason: 'décimal', serials: ['X'] })).status).toBe(422);
     const bl = await mkBl(A, S, 2, ['SN-1', 'SN-2']);
-    expect((await A.j.post(`/delivery-notes/${(await mkBl(A, S, 1, ['SN-9'])).id}/validate`)).status).toBe(409); // série inconnue
+    expect((await mkBl(A, S, 1, ['SN-9'])).error.code).toBe('SERIAL_UNAVAILABLE'); // série inconnue : refusée dès la préparation
     expect((await A.j.post(`/delivery-notes/${bl.id}/validate`)).status).toBe(200);
     expect((await ProductSerial.find({ productId: S, status: 'sold' })).map((s) => s.serialNumber).sort()).toEqual(['SN-1', 'SN-2']);
-    expect((await A.j.post(`/delivery-notes/${(await mkBl(A, S, 1, ['SN-1'])).id}/validate`)).status).toBe(409); // déjà vendu
-    await A.j.post(`/delivery-notes/${bl.id}/cancel`, { reason: 'Retour client complet' });
+    expect((await mkBl(A, S, 1, ['SN-1'])).error.code).toBe('SERIAL_UNAVAILABLE'); // déjà vendu
+    await A.j.post(`/delivery-notes/${bl.id}/cancel`, { reason: 'Retour client complet', returnConfirmed: true });
     expect((await ProductSerial.find({ productId: S, status: 'available' })).length).toBe(3);
     const t = (await A.j.post('/stock-transfers', { fromWarehouseId: A.w1, toWarehouseId: A.w2, lines: [{ productId: S, quantity: 1, serials: ['SN-3'] }] })).body; expect((await A.j.post(`/stock-transfers/${t.id}/validate`)).status).toBe(200);
     expect(String((await ProductSerial.findOne({ serialNumber: 'SN-3' }))!.warehouseId)).toBe(A.w2); expect((await levelOf(A, S, A.w2)).qty).toBe(1);

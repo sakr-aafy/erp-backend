@@ -1,6 +1,6 @@
 import { ensureFinanceCounters } from '../../services/accounting.service.js';
 import { TreasuryAccount } from '../../models/finance.model.js';
-import { Types, type ClientSession, type QueryFilter } from 'mongoose';
+import { type ClientSession, type Model, type QueryFilter, type Types } from 'mongoose';
 import { Customer } from '../../models/customer.model.js';
 import { DeliveryNote, Invoice, Payment, Proforma, Quotation, type InvoiceDoc } from '../../models/sales.model.js';
 import { record as recordQuotationEvent, type Actor } from '../quotations/quotation.activity.js';
@@ -12,8 +12,11 @@ import { ensureCounter, nextDocumentNumber } from '../../services/numbering.serv
 import { startOfDay } from '../../services/fiscal.service.js';
 import { computeDocument, groupKey, type DocTotals, pctOf, proportion, type CalcLine, type VatRegime } from '../../services/calculation.service.js';
 import { assertCanSell } from '../customers/customer.service.js';
-import { buildDocument, discountsOf, frozenOf, inheritFrom, legacyDiscountOf, linesToInput, type BuiltLine, type DocInput, type Inherited, type LineInput } from '../sales/document.builder.js';
-import { snapshotDto } from '../parties/delivery-address.js';
+import { buildDocument, discountsOf, frozenOf, inheritFrom, legacyDiscountOf, linesToInput, resolveTerms, type BuiltLine, type DocInput, type Inherited } from '../sales/document.builder.js';
+import { resolveAddress, snapshotDto, type AddressSnapshot } from '../parties/delivery-address.js';
+import * as billing from './delivery-billing.js';
+import { allocatedOf, q3, writeLines, type CycleLine } from '../sales/billing.js';
+import { logCycle, type CycleActor, type CycleEvent } from '../sales/cycle.log.js';
 import { rangeFilter } from '../sales/document.http.js';
 import { assertQuantities, carriedOver } from '../products/units.js';
 
@@ -37,7 +40,9 @@ export function toDto(i: Lean) {
     paidMinor: i.paidMinor ?? 0, creditedMinor: i.creditedMinor ?? 0, balanceDueMinor: balanceDue, paymentStatus: i.paymentStatus, overdue,
     creditedInvoiceId: i.creditedInvoiceId?.toString() ?? null, creditReason: i.creditReason ?? null,
     quotationId: i.quotationId?.toString() ?? null, proformaId: i.proformaId?.toString() ?? null, deliveryNoteIds: (i.deliveryNoteIds ?? []).map((d) => d.toString()),
-    validatedAt: i.validatedAt ?? null, sentAt: i.sentAt ?? null, createdAt: i.createdAt, editable: i.status === 'draft',
+    validatedAt: i.validatedAt ?? null, validatedByName: i.validatedByName ?? null, sentAt: i.sentAt ?? null, createdAt: i.createdAt, editable: i.status === 'draft',
+    /** Facture issue de BL : lignes et montants affectés par le serveur. */
+    origin: i.origin ?? null, linesLocked: i.origin === 'delivery', creditEffect: i.type === 'credit_note' ? i.creditEffect ?? 'financial' : null, sourceRefs: i.sourceRefs ?? null, legacyFlow: !!i.legacyFlow,
   };
 }
 
@@ -61,16 +66,15 @@ export async function getOwn(companyId: Id, id: string, session?: ClientSession)
 export const get = async (c: Id, id: string) => toDto(await getOwn(c, id));
 
 export interface InvoiceBody extends DocInput { issueDate?: Date | undefined; paymentMethod?: string | undefined; schedule?: { dueDate: Date; percent: number }[] | undefined; notes?: string | undefined }
-export interface Sources { quotationId?: Id; proformaId?: Id; deliveryNoteIds?: Id[]; type?: 'invoice' | 'credit_note'; creditedInvoiceId?: Id; creditReason?: string; lineDeliveredFull?: boolean; inherit?: Inherited | undefined }
+export interface Sources { quotationId?: Id; proformaId?: Id; deliveryNoteIds?: Id[]; type?: 'invoice' | 'credit_note'; creditedInvoiceId?: Id; creditReason?: string; inherit?: Inherited | undefined }
 
-/** Crée une facture BROUILLON (sans numéro). Utilisable seule (transaction propre) ou dans une transaction existante. */
+/** Crée une facture BROUILLON saisie directement (sans numéro). Les factures issues de BL passent par `createFromDeliveryNotes`. */
 export async function createDraft(companyId: Id, userId: Id, b: InvoiceBody, sources: Sources = {}, outer?: ClientSession) {
   const run = async (session: ClientSession) => {
     const issueDate = startOfDay(b.issueDate ?? new Date());
     const docType = sources.type === 'credit_note' ? 'creditNote' : 'invoice';
     const converted = !!(sources.quotationId || sources.proformaId || sources.deliveryNoteIds);
     const doc = await buildDocument(companyId, docType, b, { date: issueDate, session, preserveQuantities: converted, ...(sources.inherit && { inherit: sources.inherit }) });
-    if (sources.lineDeliveredFull) doc.lines.forEach((l) => { l.deliveredQty = l.quantity; });
     const [c] = await Invoice.create([{ companyId, type: sources.type ?? 'invoice', status: 'draft', customerId: doc.customer._id, customerSnapshot: doc.customerSnapshot, issueDate, paymentMethod: b.paymentMethod,
       schedule: (b.schedule ?? []).map((s) => ({ dueDate: startOfDay(s.dueDate), percent: s.percent })), lines: doc.lines, globalDiscountPct: doc.globalDiscountPct, syncDiscountPct: doc.syncDiscountPct, globalDiscountMinor: doc.globalDiscountMinor,
       withholdingOperationType: doc.withholdingOperationType, withholding: doc.withholding, stamp: doc.stamp, totals: doc.totals, notes: b.notes, ...frozenOf(doc), createdBy: userId,
@@ -85,10 +89,11 @@ export async function updateDraft(companyId: Id, id: string, b: InvoiceBody) {
   const cur = await getOwn(companyId, id);
   if (cur.status !== 'draft') throw AppError.conflict('Facture validée : non modifiable. Corrigez-la par une facture d’avoir.');
   if (cur.type === 'credit_note') throw AppError.conflict('Un avoir en brouillon ne se modifie pas : supprimez-le et recréez-le');
+  if (cur.origin === 'delivery') return updateDeliveryDraft(companyId, id, b);
   const issueDate = startOfDay(b.issueDate ?? cur.issueDate);
   return withTransaction(async (session) => {
     const inherit = inheritFrom(cur, b.customerId);
-    // Facture issue de BL : les quantités livrées (inchangées) sont conservées même si elles datent d'avant les règles d'unités
+    // Facture antérieure issue de BL : les quantités livrées (inchangées) sont conservées même si elles datent d'avant les règles d'unités
     const fromDeliveries = (cur.deliveryNoteIds ?? []).length > 0 && b.lines.every((l) => cur.lines.some((c) => String(c.productId ?? '') === (l.productId ?? '') && c.quantity === l.quantity));
     const doc = await buildDocument(companyId, 'invoice', { ...b, ...legacyDiscountOf(cur, b) }, { date: issueDate, session, preserveQuantities: fromDeliveries, ...(inherit && { inherit }) });
     if ((cur.deliveryNoteIds ?? []).length) { // facture issue de BL : les lignes livrées restent liées
@@ -102,72 +107,118 @@ export async function updateDraft(companyId: Id, id: string, b: InvoiceBody) {
   });
 }
 
-/** Suppression : brouillons uniquement. Libère les documents sources (BL, devis, proforma). */
+/** Brouillon issu de BL : dates, règlement, échéancier, adresse et conditions se modifient ; les lignes et les montants affectés, jamais. */
+async function updateDeliveryDraft(companyId: Id, id: string, b: InvoiceBody) {
+  return withTransaction(async (session) => {
+    const cur = await getOwn(companyId, id, session);
+    if (cur.status !== 'draft') throw AppError.conflict('Facture validée : non modifiable. Corrigez-la par une facture d’avoir.');
+    const same = String(cur.customerId) === String(b.customerId) && b.lines.length === cur.lines.length && b.lines.every((l, i) => { const c = cur.lines[i]!;
+      return (l.productId ?? '') === String(c.productId ?? '') && l.quantity === c.quantity && (l.unitPriceMinor ?? c.unitPriceMinor) === c.unitPriceMinor && (l.discountPct ?? 0) === (c.discountPct ?? 0); })
+      && (!b.syncDiscountPct || b.syncDiscountPct === cur.syncDiscountPct) && (!b.globalDiscountMinor || b.globalDiscountMinor === cur.globalDiscountMinor);
+    if (!same) throw new AppError(422, 'Facture issue de bons de livraison : les quantités, prix et remises viennent des livraisons. Supprimez le brouillon pour choisir d’autres quantités.', 'DELIVERY_LINES_LOCKED');
+    const issueDate = startOfDay(b.issueDate ?? cur.issueDate);
+    const op = b.withholdingOperationType ?? cur.withholdingOperationType;
+    const r = await billing.recompute(companyId, cur as never, { date: issueDate, session, withholdingOperationType: op });
+    const customer = await Customer.findOne({ _id: cur.customerId, companyId }).session(session).lean();
+    const address = resolveAddress(customer!, b.deliveryAddressId, cur.deliveryAddress as AddressSnapshot | null | undefined);
+    const u = await Invoice.findOneAndUpdate({ _id: id, companyId, status: 'draft' }, { $set: { issueDate, paymentMethod: b.paymentMethod, schedule: (b.schedule ?? []).map((s) => ({ dueDate: startOfDay(s.dueDate), percent: s.percent })),
+      lines: r.lines, totals: r.totals, withholding: r.withholding ?? null, stamp: r.stamp ?? null, withholdingOperationType: op ?? null, notes: b.notes, deliveryAddress: address, ...resolveTerms(customer!, b, cur) } }, { returnDocument: 'after', session }).lean();
+    if (!u) throw AppError.conflict('La facture a changé entre-temps');
+    return toDto(u as Lean);
+  });
+}
+
+/** Suppression : brouillons uniquement. Libère les quantités réservées et les documents sources (BL, devis, proforma). */
 export async function removeDraft(companyId: Id, id: string, actor: Actor = {}) {
   return withTransaction(async (session) => {
     const inv = await getOwn(companyId, id, session);
     if (inv.status !== 'draft') throw AppError.conflict('Une facture validée ne peut pas être supprimée : émettez une facture d’avoir.');
-    await Invoice.deleteOne({ _id: id, companyId, status: 'draft' }, { session });
-    if ((inv.deliveryNoteIds ?? []).length) await DeliveryNote.updateMany({ companyId, _id: { $in: inv.deliveryNoteIds } }, { $unset: { invoiceId: 1 } }, { session });
+    const r = await Invoice.deleteOne({ _id: id, companyId, status: 'draft' }, { session });
+    if (!r.deletedCount) throw AppError.conflict('La facture a changé entre-temps');
+    if (inv.origin === 'delivery') await billing.adjust(companyId, billing.adjustmentsOf(inv as never), 'release', session, { invoiceId: inv._id });
+    else if (inv.type === 'invoice') await releaseLegacy(companyId, inv, session);
     if (inv.quotationId) {
       const freed = await Quotation.updateOne({ _id: inv.quotationId, companyId, invoiceId: inv._id }, { $unset: { invoiceId: 1 } }, { session });
       if (freed.modifiedCount) await recordQuotationEvent(companyId, inv.quotationId, [{ kind: 'invoice_unlinked', description: 'La facture brouillon issue de ce devis a été supprimée', eventKey: `unlinked:${inv._id}` }], actor, session);
     }
-    if (inv.proformaId) await Proforma.updateOne({ _id: inv.proformaId, invoiceId: inv._id }, { status: 'pending', $unset: { invoiceId: 1 } }, { session });
+    if (inv.origin === 'delivery' || inv.proformaId || inv.deliveryNoteIds?.length) await logCycle(session, companyId, actor, [{ action: 'invoice_deleted', resourceId: inv._id, refs: [inv.proformaId, inv.quotationId, ...(inv.deliveryNoteIds ?? [])] }]);
     return inv;
   });
 }
-
-/** Facture depuis un ou plusieurs BL validés du même client, non encore facturés. */
-export async function createFromDeliveryNotes(companyId: Id, userId: Id, ids: string[], issueDate?: Date) {
-  return withTransaction(async (session) => {
-    const bls = await DeliveryNote.find({ _id: { $in: ids }, companyId }).session(session).lean();
-    if (bls.length !== new Set(ids).size) throw AppError.badRequest('Bon de livraison introuvable');
-    if (new Set(bls.map((b) => b.customerId.toString())).size !== 1) throw AppError.badRequest('Tous les bons de livraison doivent concerner le même client');
-    for (const b of bls) {
-      if (b.status !== 'validated') throw AppError.conflict(`BL ${b.number} : seuls les BL validés sont facturables`);
-      if (b.invoiceId) throw AppError.conflict(`BL ${b.number} : déjà facturé`);
+const NONE = { allocatedQty: 0, invoicedQty: 0, billedAfterMinor: 0, billedShareMinor: 0, billedDiscountMinor: 0 };
+/** Brouillon de l'ancien parcours (issu d'un BL ou d'une proforma) : les documents sources sont libérés comme auparavant. */
+async function releaseLegacy(companyId: Id, inv: Lean, session: ClientSession) {
+  if ((inv.deliveryNoteIds ?? []).length) {
+    for (const d of await DeliveryNote.find({ companyId, _id: { $in: inv.deliveryNoteIds }, invoiceId: inv._id }).session(session).lean()) {
+      const counted = d.lines.filter((l) => l.allocatedQty !== undefined && l.allocatedQty !== null);
+      await writeLines(DeliveryNote as unknown as Model<unknown>, companyId, d as never, new Map(counted.map((l) => [String((l as { _id: Id })._id), { allocatedQty: 0, invoicedQty: 0 }])), session, { $unset: { invoiceId: 1 }, $pull: { invoiceIds: inv._id } });
+      const src = d.source?.id && d.source.type === 'proforma' ? await Proforma.findOne({ _id: d.source.id, companyId }).session(session).lean() : null;
+      if (src) await writeLines(Proforma as unknown as Model<unknown>, companyId, src as never, new Map(src.lines.filter((l) => l.allocatedQty !== undefined && l.allocatedQty !== null).map((l) => [String((l as { _id: Id })._id), NONE])), session);
     }
-    const lines: LineInput[] = bls.flatMap((b) => linesToInput(b.lines));
-    const inv = await createDraft(companyId, userId, { customerId: bls[0]!.customerId, lines, ...(issueDate && { issueDate }), notes: `BL : ${bls.map((b) => b.number).join(', ')}` },
-      { deliveryNoteIds: bls.map((b) => b._id), lineDeliveredFull: true, inherit: await inheritFromDeliveries(companyId, bls, session) }, session);
-    const r = await DeliveryNote.updateMany({ _id: { $in: bls.map((b) => b._id) }, invoiceId: { $exists: false } }, { invoiceId: new Types.ObjectId(inv.id) }, { session }); // garde de concurrence
-    if (r.modifiedCount !== bls.length) throw AppError.conflict('Un bon de livraison vient d’être facturé par ailleurs');
-    return inv;
-  });
+  }
+  if (inv.proformaId) {
+    const p = await Proforma.findOne({ _id: inv.proformaId, companyId, invoiceId: inv._id }).session(session).lean();
+    if (p) await writeLines(Proforma as unknown as Model<unknown>, companyId, p as never, new Map(p.lines.filter((l) => l.allocatedQty !== undefined && l.allocatedQty !== null).map((l) => [String((l as { _id: Id })._id), NONE])), session, { $set: { status: 'pending' }, $unset: { invoiceId: 1 } });
+  }
+}
+/**
+ * Validation d'un brouillon de l'ancien parcours : la facture ne peut pas dépasser les quantités des BL qu'elle porte ; les
+ * compteurs de facturation sont ensuite alignés, comme pour une facture du nouveau parcours.
+ */
+async function settleLegacy(companyId: Id, inv: Lean, session: ClientSession) {
+  const ids = inv.deliveryNoteIds ?? [];
+  if (ids.length) {
+    const bls = await DeliveryNote.find({ companyId, _id: { $in: ids } }).session(session).lean();
+    if (bls.some((d) => d.status !== 'validated')) throw new AppError(409, 'Un bon de livraison de cette facture n’est plus validé', 'DELIVERY_NOT_VALIDATED');
+    const delivered = new Map<string, number>(); for (const d of bls) for (const l of d.lines) if (l.productId) delivered.set(String(l.productId), q3((delivered.get(String(l.productId)) ?? 0) + l.quantity - (l.returnedQty ?? 0)));
+    const billed = new Map<string, number>(); for (const l of inv.lines) if (l.productId) billed.set(String(l.productId), q3((billed.get(String(l.productId)) ?? 0) + l.quantity));
+    for (const [p, q] of billed) if (q > (delivered.get(p) ?? 0) + 1e-9) throw new AppError(409, 'La facture dépasse les quantités livrées par ses bons de livraison', 'BILLING_EXCEEDED');
+    for (const d of bls) {
+      const lines = d.lines as unknown as CycleLine[];
+      await writeLines(DeliveryNote as unknown as Model<unknown>, companyId, d as never, new Map(lines.map((l) => { const q = allocatedOf(d as never, l); return [String(l._id), { allocatedQty: q, invoicedQty: q }]; })), session);
+      const src = d.source?.id && d.source.type === 'proforma' ? await Proforma.findOne({ _id: d.source.id, companyId }).session(session).lean() : null;
+      if (src) {
+        const changes = new Map<string, Record<string, unknown>>();
+        for (const l of lines) { const sl = src.lines.find((x) => String((x as { _id: Id })._id) === String(l.sourceLineId)); if (!sl) continue;
+          const k = String(l.sourceLineId); const q = q3(((changes.get(k)?.invoicedQty as number | undefined) ?? sl.invoicedQty ?? 0) + l.quantity); changes.set(k, { invoicedQty: q }); }
+        await writeLines(Proforma as unknown as Model<unknown>, companyId, src as never, changes, session);
+      }
+    }
+  } else if (inv.proformaId) {
+    const p = await Proforma.findOne({ _id: inv.proformaId, companyId, invoiceId: inv._id }).session(session).lean();
+    if (p) await writeLines(Proforma as unknown as Model<unknown>, companyId, p as never, new Map(p.lines.map((l) => [String((l as { _id: Id })._id), { allocatedQty: l.quantity, invoicedQty: l.quantity }])), session);
+  }
 }
 
-/**
- * Facture issue de bons de livraison : adresse commune aux BL (aucune s'ils diffèrent) et, lorsqu'ils proviennent tous
- * du même devis / proforma, conditions de paiement de ce document source (sinon celles du client).
- */
-async function inheritFromDeliveries(companyId: Id, bls: { deliveryAddress?: unknown; source?: { type?: string | null; id?: Id | null } | null }[], session: ClientSession): Promise<Inherited> {
-  const keys = new Set(bls.map((b) => JSON.stringify(b.deliveryAddress)));
-  const out: Inherited = { deliveryAddress: keys.size === 1 ? bls[0]!.deliveryAddress : null };
-  const sources = new Set(bls.map((b) => (b.source?.id ? `${b.source.type}:${b.source.id}` : '')));
-  const src = bls[0]!.source;
-  if (sources.size === 1 && src?.id && (src.type === 'quotation' || src.type === 'proforma')) {
-    const d = await (src.type === 'quotation' ? Quotation : Proforma as unknown as typeof Quotation).findOne({ _id: src.id, companyId }).session(session).lean();
-    if (d) Object.assign(out, { paymentTerms: d.paymentTerms, paymentTermsCustom: d.paymentTermsCustom });
-  }
-  return out;
+/** Facture(s) brouillon depuis des BL validés : une seule (groupée) ou une par BL (individuelle). */
+export async function createFromDeliveryNotes(companyId: Id, userId: Id, b: billing.BillingBody, actor: CycleActor = { userId }) {
+  const ids = await billing.createFromDeliveries(companyId, userId, b, actor);
+  const found = await Invoice.find({ companyId, _id: { $in: ids } }).lean();
+  return ids.map((id) => toDto(found.find((i) => i._id.equals(id)) as Lean));
 }
 
 /** Avoir (brouillon) depuis une facture validée : total (quantités restantes) ou partiel par ligne ; montants proportionnels. */
-export async function createCreditNote(companyId: Id, userId: Id, invoiceId: string, b: { reason: string; lines?: { sourceLineId: string; quantity: number }[] | undefined }) {
+export type CreditEffect = 'financial' | 'return' | 'billing_correction';
+export async function createCreditNote(companyId: Id, userId: Id, invoiceId: string, b: { reason: string; effect?: CreditEffect | undefined; lines?: { sourceLineId: string; quantity: number }[] | undefined }, actor: CycleActor = { userId }) {
   return withTransaction(async (session) => {
     const inv = await getOwn(companyId, invoiceId, session);
     if (inv.type !== 'invoice' || inv.status !== 'validated') throw AppError.conflict('Un avoir ne peut être émis que sur une facture validée');
+    const effect = b.effect ?? 'financial';
+    if (effect === 'billing_correction' && inv.origin !== 'delivery') throw new AppError(422, 'Correction de facturation impossible : cette facture n’est pas issue de bons de livraison. Utilisez un avoir financier.', 'NO_DELIVERY_TO_REBILL');
+    if (effect === 'return' && !inv.deliveryNoteIds?.length && !(await DeliveryNote.exists({ companyId, 'source.id': inv._id, status: 'validated' }).session(session))) throw new AppError(422, 'Aucune livraison liée à cette facture : un avoir financier suffit.', 'RETURN_WITHOUT_DELIVERY');
     const credited = await creditedQuantities(companyId, inv._id, session);
     const wanted = b.lines ?? inv.lines.map((l) => ({ sourceLineId: (l as { _id: Id })._id.toString(), quantity: l.quantity - (credited.get((l as { _id: Id })._id.toString()) ?? 0) })).filter((x) => x.quantity > 1e-9);
     if (!wanted.length) throw AppError.conflict('Cette facture est déjà intégralement créditée');
     await assertQuantities(companyId, wanted.map((w) => { const ol = inv.lines.find((x) => String((x as { _id: Id })._id) === w.sourceLineId); return { productId: ol?.productId, unit: ol?.unit, quantity: w.quantity, label: ol ? `« ${ol.designation} »` : undefined, exempt: !!ol && carriedOver(w.quantity, ol.quantity, ol.quantity - (credited.get(w.sourceLineId) ?? 0)) }; }), session);
     const doc = await buildCreditDocument(companyId, inv, wanted, session);
     const [c] = await Invoice.create([{ companyId, type: 'credit_note', status: 'draft', customerId: inv.customerId, customerSnapshot: inv.customerSnapshot, issueDate: startOfDay(new Date()), lines: doc.lines, withholdingOperationType: inv.withholdingOperationType,
-      deliveryAddress: inv.deliveryAddress, paymentTerms: inv.paymentTerms, paymentTermsCustom: inv.paymentTermsCustom, withholding: doc.withholding, totals: doc.totals, notes: `Avoir sur facture ${inv.number}`, createdBy: userId, creditedInvoiceId: inv._id, creditReason: b.reason }] as never[], { session });
+      deliveryAddress: inv.deliveryAddress, paymentTerms: inv.paymentTerms, paymentTermsCustom: inv.paymentTermsCustom, withholding: doc.withholding, totals: doc.totals, notes: `Avoir sur facture ${inv.number}`, createdBy: userId, creditedInvoiceId: inv._id, creditReason: b.reason, creditEffect: effect,
+      ...(inv.sourceRefs && { sourceRefs: inv.sourceRefs }) }] as never[], { session });
+    await logCycle(session, companyId, actor, [{ action: 'credit_created', resourceId: c!._id, description: `Sur la facture ${inv.number} — ${CREDIT_EFFECT_LABEL[effect]} — ${b.reason}`, refs: [inv._id, inv.proformaId, inv.quotationId, ...(inv.deliveryNoteIds ?? [])] }]);
     return toDto(c!.toObject() as Lean);
   });
 }
+export const CREDIT_EFFECT_LABEL: Record<CreditEffect, string> = { financial: 'avoir financier (quantités inchangées)', return: 'retour de marchandise attendu', billing_correction: 'correction de facturation (quantités à refacturer)' };
 type CreditRequest = { sourceLineId: string; quantity: number };
 /**
  * Construit un avoir PROPORTIONNEL à la facture d'origine (remise globale en % ou en montant comprise) :
@@ -196,7 +247,8 @@ async function buildCreditDocument(companyId: Id, orig: Lean, requested: CreditR
     const vat = { ruleId: o.vat.ruleId!, code: o.vat.code!, regime: o.vat.regime as VatRegime, ratePct: o.vat.ratePct ?? 0 };
     calc.push({ quantity: qty, unitPriceMinor: o.unitPriceMinor, discountPct: 0, vatCode: vat.code, vatRegime: vat.regime, vatRatePct: vat.ratePct, netHtOverrideMinor: net });
     lines.push({ ...(o.productId && { productId: o.productId }), reference: o.reference ?? undefined, designation: o.designation, description: o.description ?? undefined, unit: o.unit ?? undefined, kind: (o.kind as 'product' | 'service') ?? 'product',
-      quantity: qty, unitPriceMinor: o.unitPriceMinor, discountPct: o.discountPct ?? 0, vat, grossMinor: 0, discountMinor: 0, netHtMinor: net, globalShareMinor: 0, deliveredQty: 0, sourceLineId: lineId });
+      quantity: qty, unitPriceMinor: o.unitPriceMinor, discountPct: o.discountPct ?? 0, vat, grossMinor: 0, discountMinor: 0, netHtMinor: net, globalShareMinor: 0, deliveredQty: 0, sourceLineId: lineId,
+      ...(o.delivery && { delivery: o.delivery }), ...(o.serials?.length && qty >= o.quantity - 1e-9 && { serials: o.serials }) });
   }
   const base = computeDocument({ lines: calc }); // bases par groupe de TVA
   // TVA : le groupe entièrement crédité reprend exactement la TVA d'origine moins celle déjà créditée
@@ -228,7 +280,7 @@ async function creditedQuantities(companyId: Id, invoiceId: Id, session?: Client
  * contrôle de la limite de crédit, attribution du numéro légal séquentiel, échéancier, mise à jour du solde client.
  * Après validation le document est IMMUABLE.
  */
-export async function validate(companyId: Id, userId: Id, id: string) {
+export async function validate(companyId: Id, userId: Id, id: string, userName?: string) {
   await ensureFinanceCounters(companyId);
   const pre = await getOwn(companyId, id); // le compteur doit exister avant la transaction (instantané)
   await ensureCounter(companyId, pre.type === 'credit_note' ? 'creditNote' : 'invoice', startOfDay(pre.issueDate));
@@ -242,12 +294,19 @@ export async function validate(companyId: Id, userId: Id, id: string) {
     if (last && issueDate < startOfDay(last.issueDate)) throw AppError.conflict(`Date antérieure à celle de la dernière ${isCredit ? 'facture d’avoir' : 'facture'} validée (${last.number}) : la chronologie doit suivre la numérotation`);
 
     let doc: { customer?: { paymentDelayDays?: number | null | undefined }; customerSnapshot?: unknown; lines: BuiltLine[]; totals: DocTotals; withholding?: unknown; stamp?: unknown };
+    let origin: Lean | null = null;
     if (isCredit) {
       // Recalcul de l'avoir sur l'état ACTUEL des avoirs déjà validés (contrôle des quantités et des montants disponibles)
       const orig = await getOwn(companyId, inv.creditedInvoiceId!.toString(), session);
       const built = await buildCreditDocument(companyId, orig, inv.lines.map((l) => ({ sourceLineId: l.sourceLineId!.toString(), quantity: l.quantity })), session, inv._id);
+      origin = orig;
       doc = { ...built, customerSnapshot: inv.customerSnapshot };
+    } else if (inv.origin === 'delivery') {
+      // Quantités et montants affectés à la création ; règles fiscales à la date de la facture
+      const r = await billing.recompute(companyId, inv as never, { date: issueDate, session, withholdingOperationType: inv.withholdingOperationType });
+      doc = { ...r, customerSnapshot: inv.customerSnapshot };
     } else {
+      await settleLegacy(companyId, inv, session);
       const input: DocInput = { customerId: inv.customerId, lines: linesToInput(inv.lines, false, 'keep'), ...discountsOf(inv), withholdingOperationType: inv.withholdingOperationType };
       const built = await buildDocument(companyId, 'invoice', input, { date: issueDate, session, preserveQuantities: true });
       built.lines.forEach((l, i) => { l.deliveredQty = inv.lines[i]!.deliveredQty ?? 0; });
@@ -268,7 +327,9 @@ export async function validate(companyId: Id, userId: Id, id: string) {
 
     const number = await nextDocumentNumber(companyId, isCredit ? 'creditNote' : 'invoice', session, issueDate);
     const schedule = isCredit || payable === 0 ? [] : buildSchedule(inv, payable, issueDate, (doc.customer?.paymentDelayDays ?? 0));
-    const u = await Invoice.findOneAndUpdate({ _id: id, companyId, status: 'draft' }, { $set: { status: 'validated', number, validatedAt: new Date(), validatedBy: userId, issueDate, lines: doc.lines, withholding: doc.withholding ?? null,
+    if (isCredit && inv.creditEffect === 'billing_correction') await billing.reopenFromCredit(companyId, { _id: inv._id, lines: doc.lines }, origin as never, session);
+    if (!isCredit && inv.origin === 'delivery') await billing.adjust(companyId, billing.adjustmentsOf(inv as never), 'commit', session);
+    const u = await Invoice.findOneAndUpdate({ _id: id, companyId, status: 'draft' }, { $set: { status: 'validated', number, validatedAt: new Date(), validatedBy: userId, validatedByName: userName, issueDate, lines: doc.lines, withholding: doc.withholding ?? null,
       stamp: doc.stamp ?? null, totals: doc.totals, customerSnapshot: doc.customerSnapshot, schedule, paymentStatus: isCredit || payable === 0 ? 'paid' : 'unpaid' } }, { returnDocument: 'after', session }).lean();
     if (!u) throw AppError.conflict('La facture a changé entre-temps');
 
@@ -286,6 +347,12 @@ export async function validate(companyId: Id, userId: Id, id: string) {
       }
     }
     await emitDomainEvent(isCredit ? 'creditNote.validated' : 'invoice.validated', { companyId, documentId: inv._id, session, userId });
+    const chain = origin ?? inv; const refs = [chain.proformaId, chain.quotationId, ...(chain.deliveryNoteIds ?? []), ...(origin ? [origin._id] : [])];
+    const events: CycleEvent[] = isCredit
+      ? [{ action: 'credit_validated', resourceId: inv._id, number, refs, description: `${CREDIT_EFFECT_LABEL[inv.creditEffect ?? 'financial']} — facture ${origin!.number}` },
+        ...(inv.creditEffect === 'billing_correction' ? [{ action: 'quantities_reopened' as const, resourceId: inv._id, number, refs }] : [])]
+      : [{ action: 'invoice_validated', resourceId: inv._id, number, refs }, ...(payable > 0 ? [{ action: 'receivable_created' as const, resourceId: inv._id, number, refs, description: `${schedule.length} échéance(s)` }] : [])];
+    await logCycle(session, companyId, { userId, name: userName }, events);
     return toDto(u as Lean);
   });
 }

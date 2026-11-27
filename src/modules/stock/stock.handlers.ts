@@ -1,4 +1,6 @@
+import type { Types } from 'mongoose';
 import { DeliveryNote } from '../../models/sales.model.js';
+import { slice } from '../sales/billing.js';
 import { GoodsReceipt, Inventory, StockLevel, StockMovement, StockTransfer } from '../../models/logistics.model.js';
 import { Product } from '../../models/product.model.js';
 import { applyMovement, defaultWarehouseId } from '../../services/stock.service.js';
@@ -33,6 +35,25 @@ export function registerStockHandlers() {
     for (const m of moves) {
       const r = await applyMovement({ companyId: ctx.companyId, session: ctx.session, userId: ctx.userId, productId: m.productId, warehouseId: m.warehouseId, direction: 'in', quantity: m.quantity, reason: 'delivery_cancel',
         eventKey: `deliveryNote.cancelled:${ctx.documentId}:${m._id}`, source: m.source ? { type: m.source.type!, id: m.source.id!, number: m.source.number ?? undefined } : undefined, totalValueMinor: m.valueMinor, serials: m.serials });
+      if (r.movement && !r.duplicate) n++;
+    }
+    return { movements: n };
+  }, 'stock');
+
+  // Retour physique confirmé → réintégration à la valeur de la sortie d'origine ; jamais d'entrée sans sortie préalable
+  onDomainEvent('deliveryNote.returned', async (ctx) => {
+    const noteId = (ctx.payload as { deliveryNoteId: Types.ObjectId }).deliveryNoteId;
+    const bl = await DeliveryNote.findOne({ _id: noteId, companyId: ctx.companyId }).session(ctx.session).lean();
+    const index = (bl?.returns ?? []).findIndex((r) => String((r as { _id: unknown })._id) === String(ctx.documentId));
+    if (!bl || index < 0) return;
+    const ret = bl.returns![index]!;
+    let n = 0;
+    for (const l of ret.lines) {
+      const out = await StockMovement.findOne({ companyId: ctx.companyId, eventKey: `deliveryNote.validated:${bl._id}:${l.lineId}` }).session(ctx.session).lean();
+      if (!out) continue; // service, ligne libre ou livraison sans mouvement : aucun stock à réintégrer
+      const before = Math.round(bl.returns!.slice(0, index).flatMap((r) => r.lines).filter((x) => String(x.lineId) === String(l.lineId)).reduce((s, x) => s + (x.quantity ?? 0), 0) * 1000) / 1000;
+      const r = await applyMovement({ companyId: ctx.companyId, session: ctx.session, userId: ctx.userId, productId: out.productId, warehouseId: ret.warehouseId!, direction: 'in', quantity: l.quantity!, reason: 'customer_return',
+        eventKey: `deliveryNote.returned:${ctx.documentId}:${l.lineId}`, source: { type: 'deliveryNote', id: bl._id, number: bl.number }, totalValueMinor: slice(out.valueMinor ?? 0, before, l.quantity!, out.quantity), serials: l.serials ?? undefined, note: ret.reason });
       if (r.movement && !r.duplicate) n++;
     }
     return { movements: n };

@@ -12,7 +12,7 @@ import { logger } from '../config/logger.js';
  * JOURNAL : succès enregistrés dans la transaction ; ÉCHECS enregistrés HORS transaction (donc conservés malgré le rollback),
  * avec message et nombre de tentatives, pour la reprise (`/stock/events/:id/retry`).
  */
-export type DomainEvent = 'deliveryNote.validated' | 'deliveryNote.cancelled' | 'invoice.validated' | 'creditNote.validated' | 'payment.recorded' | 'payment.cancelled'
+export type DomainEvent = 'deliveryNote.validated' | 'deliveryNote.cancelled' | 'deliveryNote.returned' | 'invoice.validated' | 'creditNote.validated' | 'payment.recorded' | 'payment.cancelled'
   | 'goodsReceipt.validated' | 'stockTransfer.validated' | 'inventory.validated'
   | 'purchaseInvoice.validated' | 'supplierPayment.recorded' | 'supplierPayment.cancelled' | 'expense.validated' | 'expense.cancelled' | 'treasuryTransfer.recorded' | 'treasuryTransfer.cancelled' | 'treasuryMovement.recorded';
 export interface EventContext { companyId: Types.ObjectId; documentId: Types.ObjectId; session: ClientSession; userId?: Types.ObjectId | undefined; payload?: unknown; documentNumber?: string | undefined }

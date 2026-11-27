@@ -24,7 +24,7 @@ beforeAll(async () => {
   const c = await A.j.post(`/invoices/${inv1}/credit-note`, { reason: 'Retour' }); cn = c.body.id; expect((await A.j.post(`/invoices/${cn}/validate`)).status).toBe(200);
   expect((await A.j.post(`/invoices/${inv2}/payments`, { amountMinor: 40_000, method: 'transfer', treasuryAccountId: bank })).status).toBe(201);
   // Devis : accepté + converti en facture, refusé, en attente
-  const q1 = (await A.j.post('/quotations', quoteBody(A, [line(A.products.a19, 1)]))).body; await acceptQuote(A.j, q1.id); const pro = (await A.j.post(`/quotations/${q1.id}/convert-proforma`)).body; expect((await A.j.post(`/proformas/${pro.proformaId}/convert-invoice`)).status).toBe(201);
+  const q1 = (await A.j.post('/quotations', quoteBody(A, [line(A.products.a19, 1)]))).body; await acceptQuote(A.j, q1.id); const pro = (await A.j.post(`/quotations/${q1.id}/convert-proforma`)).body; expect((await A.j.post(`/proformas/${pro.proformaId}/convert-invoice`)).status).toBe(410);
   const q2 = (await A.j.post('/quotations', quoteBody(A, [line(A.products.a19, 1)]))).body; await refuseQuote(A.j, q2.id); await A.j.post('/quotations', quoteBody(A, [line(A.products.a19, 1)]));
   // Stock : +10 à 1 000, −4 ; réception partielle d'une commande (6 sur 10 à 10 000) ; seuil minimum ; transfert
   await stockIn(A, A.products.a19, 10, 1_000); await stockOut(A, A.products.a19, 4);

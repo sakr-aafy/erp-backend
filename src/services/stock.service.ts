@@ -46,7 +46,7 @@ export async function defaultWarehouseId(companyId: Id, session?: ClientSession)
  */
 function assertProductAllows(p: { reference: string; status?: string | null | undefined; isActive?: boolean | null | undefined }, reason: MovementReason) {
   const st = p.status ?? (p.isActive === false ? 'inactive' : 'active');
-  const ok = reason === 'delivery' ? st === 'active' : reason === 'receipt' || reason === 'import' || reason === 'manual_in' ? st === 'active' || st === 'inactive' : reason === 'delivery_cancel' ? true : st !== 'archived';
+  const ok = reason === 'delivery' ? st === 'active' : reason === 'receipt' || reason === 'import' || reason === 'manual_in' ? st === 'active' || st === 'inactive' : reason === 'delivery_cancel' || reason === 'customer_return' ? true : st !== 'archived';
   if (!ok) { const label = ({ inactive: 'inactif', blocked: 'bloqué', archived: 'archivé' } as Record<string, string>)[st] ?? st; throw new AppError(409, `Article « ${p.reference} » ${label} : opération de stock impossible`, `PRODUCT_${st.toUpperCase()}`); }
 }
 
@@ -106,11 +106,12 @@ async function handleSerials(inp: MovementInput, product: { _id: Id; reference: 
   const rows = await ProductSerial.find({ companyId, productId: product._id, serialNumber: { $in: serials } }).session(session);
   const byNumber = new Map(rows.map((r) => [r.serialNumber, r]));
   if (inp.direction === 'in') {
-    const reuse = inp.reason === 'delivery_cancel' || inp.reason === 'transfer_in';
+    const reuse = inp.reason === 'delivery_cancel' || inp.reason === 'transfer_in' || inp.reason === 'customer_return';
     for (const sn of serials) {
       const row = byNumber.get(sn);
       if (reuse) {
         if (!row) throw AppError.conflict(`Numéro de série inconnu : ${sn}`);
+        if (inp.reason !== 'transfer_in' && row.status !== 'sold') throw AppError.conflict(`Numéro de série ${sn} : il n’est pas sorti du stock, aucun retour possible`);
         row.status = 'available'; row.warehouseId = inp.warehouseId as never; row.set('soldOn', undefined); await row.save({ session });
       } else {
         if (row && !(row.status === 'returned' || row.status === 'scrapped')) throw AppError.conflict(`Numéro de série déjà enregistré : ${sn}`);

@@ -70,7 +70,7 @@ export async function movementsAll(companyId: Id, f: Omit<MovementFilters, 'page
 }
 
 export const REASON_LABELS: Record<string, string> = { receipt: 'Réception', import: 'Importation', delivery: 'Livraison', delivery_cancel: 'Annulation de livraison', transfer_out: 'Transfert (sortie)', transfer_in: 'Transfert (entrée)',
-  inventory_in: 'Inventaire (+)', inventory_out: 'Inventaire (−)', manual_in: 'Entrée manuelle', manual_out: 'Sortie manuelle' };
+  inventory_in: 'Inventaire (+)', inventory_out: 'Inventaire (−)', manual_in: 'Entrée manuelle', manual_out: 'Sortie manuelle', customer_return: 'Retour client' };
 type Ov = Awaited<ReturnType<typeof overviewAll>>[number]; type Mv = ReturnType<typeof mdto>;
 export const overviewColumns = (d: number): Column<Ov>[] => [
   { header: 'Référence', key: 'ref', width: 16, value: (r) => r.reference }, { header: 'Désignation', key: 'name', width: 34, value: (r) => r.name }, { header: 'Unité', key: 'unit', width: 8, value: (r) => r.unit },

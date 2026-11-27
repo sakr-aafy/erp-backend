@@ -196,7 +196,11 @@ describe('adresses de livraison multiples — clients', () => {
     expect(qText).toContain('LIVRAISON'); expect(qText).toContain('Ariana'); expect(qText).toContain('+216 98 123 456');
     await acceptQuote(A.j, q.id); const pro = (await A.j.post(`/quotations/${q.id}/convert-proforma`)).body;
     expect((await A.j.get(`/proformas/${pro.proformaId}`)).body.deliveryAddress.label).toBe('Dépôt Tunis');
-    const inv = (await A.j.post(`/proformas/${pro.proformaId}/convert-invoice`)).body;
+    // la proforma se livre puis le BL se facture : l'adresse suit la chaîne
+    await stockIn(A, A.products.a19, 2, 50_000);
+    const lines = (await A.j.get(`/proformas/${pro.proformaId}`)).body.lines;
+    const note = (await A.j.post('/delivery-notes', { source: { type: 'proforma', id: pro.proformaId }, lines: [{ sourceLineId: lines[0].id, quantity: 2 }] })).body; expect((await A.j.post(`/delivery-notes/${note.id}/validate`)).status).toBe(200);
+    const created = (await A.j.post('/invoices/from-delivery-notes', { deliveryNoteIds: [note.id] })).body; const inv = { invoiceId: created.id as string };
     const draft = (await A.j.get(`/invoices/${inv.invoiceId}`)).body; expect(draft.deliveryAddress.label).toBe('Dépôt Tunis');
     // le référentiel change avant la validation : le document garde sa copie
     await A.j.put(`/customers/${c}/delivery-addresses/${depot}`, { city: 'Bizerte', label: 'Dépôt déplacé' });

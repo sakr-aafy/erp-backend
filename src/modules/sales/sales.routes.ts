@@ -2,9 +2,11 @@ import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { asyncHandler as h } from '../../utils/async-handler.js';
 import { validate } from '../../middlewares/validate.js';
-import { authenticate, requirePermission } from '../../middlewares/auth.js';
+import { authenticate } from '../../middlewares/auth.js';
 import { AppError } from '../../utils/errors.js';
+import { objectId } from '../../utils/pagination.js';
 import { docFields, previewTotals, type DocType } from './document.builder.js';
+import * as chain from './chain.service.js';
 
 const body = z.object({ docType: z.enum(['quotation', 'proforma', 'invoice', 'creditNote', 'deliveryNote']), issueDate: z.coerce.date().optional(), ...docFields,
   /** Aperçu uniquement : ancienne remise globale d'un document en cours de modification. */
@@ -19,4 +21,13 @@ salesRoutes.post('/calculate', validate({ body }), h(async (req: Request, res: R
   if (!req.auth!.permissions.has(PERM[b.docType]) && !req.auth!.permissions.has(PERM[b.docType].replace(':create', ':update'))) throw AppError.forbidden('Accès refusé');
   res.json(await previewTotals(req.auth!.companyId, b.docType, { ...b, globalDiscountPct: b.legacyGlobalDiscountPct ?? 0 }, b.issueDate ?? new Date()));
 }));
-void requirePermission;
+
+/** Documents associés et chronologie d'un cycle : consultation du document de départ requise, puis filtrage par type. */
+const chainQuery = z.object({ type: z.enum(['quotation', 'proforma', 'deliveryNote', 'invoice']), id: objectId });
+const chainHandler = (fn: typeof chain.documents | typeof chain.activities) => h(async (req: Request, res: Response) => {
+  const q = req.query as unknown as z.infer<typeof chainQuery>;
+  if (!req.auth!.permissions.has(chain.CHAIN_PERMISSION[q.type])) throw AppError.forbidden('Accès refusé');
+  res.json(await fn(req.auth!.companyId, q.type, q.id, req.auth!.permissions));
+});
+salesRoutes.get('/chain', validate({ query: chainQuery }), chainHandler(chain.documents));
+salesRoutes.get('/chain/activities', validate({ query: chainQuery }), chainHandler(chain.activities));

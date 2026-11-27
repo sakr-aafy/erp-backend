@@ -9,14 +9,19 @@ export async function pdfOf(companyId: Types.ObjectId, kind: 'quotation' | 'prof
   // Document antérieur aux adresses multiples : l'adresse de livraison copiée dans le client reste imprimée
   const legacy = d.customer?.shippingAddress;
   const deliveryAddress = d.deliveryAddress ?? (legacy && (legacy.street || legacy.city) ? legacy : undefined);
-  const common = { customer: d.customer, lines: d.lines, totals: d.totals ?? {}, notes: d.notes, terms: d.terms, paymentTerms: d.paymentTerms, deliveryTime: d.deliveryTime, deliveryAddress };
+  const lines = kind === 'quotation' ? d.lines : (d.lines as Any[]).map((l) => {
+    const details = [kind === 'invoice' && l.delivery?.noteNumber && `Livré par ${l.delivery.noteNumber}`, l.serials?.length && `N° de série : ${l.serials.join(', ')}`].filter(Boolean).join(' — ');
+    return details ? { ...l, details } : l;
+  });
+  const quote = (number?: string | null, version?: number | null): [string, string][] => (number ? [['Devis', `${number}${version ? ` (version ${version})` : ''}`]] : []);
+  const common = { legacyDiscountPct: d.globalDiscountPct, customer: d.customer, lines, totals: d.totals ?? {}, notes: d.notes, terms: d.terms, paymentTerms: d.paymentTerms, deliveryTime: d.deliveryTime, deliveryAddress };
   switch (kind) {
-    case 'quotation': return renderDocumentPdf(companyId, { ...common, layout: 'quotation', version: d.version, legacyDiscountPct: d.globalDiscountPct, title: 'DEVIS', number: d.number, date: d.issueDate, secondaryDateLabel: 'Valable jusqu’au', secondaryDate: d.validUntil });
-    case 'proforma': return renderDocumentPdf(companyId, { ...common, title: 'FACTURE PROFORMA', mention: 'PROFORMA', number: d.number, date: d.issueDate, secondaryDateLabel: 'Valable jusqu’au', secondaryDate: d.validUntil });
+    case 'quotation': return renderDocumentPdf(companyId, { ...common, layout: 'quotation', version: d.version, title: 'DEVIS', number: d.number, date: d.issueDate, secondaryDateLabel: 'Valable jusqu’au', secondaryDate: d.validUntil });
+    case 'proforma': return renderDocumentPdf(companyId, { ...common, extra: quote(d.quotationNumber, d.quotationVersion), title: 'FACTURE PROFORMA', mention: 'PROFORMA', number: d.number, date: d.issueDate, secondaryDateLabel: 'Valable jusqu’au', secondaryDate: d.validUntil });
     case 'invoice': return renderDocumentPdf(companyId, { ...common, title: d.type === 'credit_note' ? 'FACTURE D’AVOIR' : 'FACTURE', number: d.number, draft: d.status === 'draft', date: d.issueDate,
       schedule: d.schedule?.length ? d.schedule : undefined, withholdingLabel: d.withholding ? `Retenue à la source ${d.withholding.ratePct} %` : RS['x'],
-      ...(d.creditReason && { extra: [['Motif', d.creditReason]] as [string, string][] }) });
+      extra: [...(d.sourceRefs?.proformaNumber ? [['Proforma', d.sourceRefs.proformaNumber] as [string, string]] : []), ...quote(d.sourceRefs?.quotationNumber, d.sourceRefs?.quotationVersion), ...(d.creditReason ? [['Motif', d.creditReason] as [string, string]] : [])] });
     case 'deliveryNote': return renderDocumentPdf(companyId, { ...common, title: 'BON DE LIVRAISON', number: d.number, date: d.deliveryDate, showPrices: false,
-      ...(d.carrier && { extra: [['Transporteur', d.carrier]] as [string, string][] }), ...(d.source && { secondaryDateLabel: 'Réf. source', secondaryDate: null }) });
+      extra: [...(d.source?.number ? [['Réf.', d.source.number] as [string, string]] : []), ...(d.carrier ? [['Transporteur', d.carrier] as [string, string]] : [])] });
   }
 }

@@ -21,7 +21,7 @@ stockLevelSchema.index({ companyId: 1, warehouseId: 1 });
 export type StockLevelDoc = InferSchemaType<typeof stockLevelSchema>;
 export const StockLevel = model('StockLevel', stockLevelSchema);
 
-export const MOVEMENT_REASONS = ['receipt', 'import', 'delivery', 'delivery_cancel', 'transfer_out', 'transfer_in', 'inventory_in', 'inventory_out', 'manual_in', 'manual_out'] as const;
+export const MOVEMENT_REASONS = ['receipt', 'import', 'delivery', 'delivery_cancel', 'transfer_out', 'transfer_in', 'inventory_in', 'inventory_out', 'manual_in', 'manual_out', 'customer_return'] as const;
 /** Mouvement de stock : IMMUABLE (aucune route de modification ; correction = mouvement inverse). `eventKey` unique = idempotence. */
 const movementSchema = new Schema({
   companyId: company, productId: oid('Product', true), warehouseId: oid('Warehouse', true), direction: { type: String, enum: ['in', 'out'], required: true },

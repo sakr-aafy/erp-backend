@@ -26,7 +26,7 @@ export const KINDS: Record<Kind, KindDef> = {
   import_file: { group: 'imports', label: 'Dossier d’importation', permission: 'imports:view', statuses: ['draft', 'ordered', 'shipped', 'customs', 'arrived', 'closed', 'integrated', 'cancelled'], webPath: '/imports' },
   cost_history: { group: 'imports', label: 'Coût de revient', permission: 'costCalculation:view', statuses: [], webPath: '/costs' },
 };
-export const MOVEMENT_LABEL: Record<string, string> = { receipt: 'Réception', import: 'Intégration d’importation', delivery: 'Livraison', delivery_cancel: 'Annulation de livraison', transfer_out: 'Transfert (sortie)', transfer_in: 'Transfert (entrée)', inventory_in: 'Inventaire (écart +)', inventory_out: 'Inventaire (écart −)', manual_in: 'Entrée manuelle', manual_out: 'Sortie manuelle' };
+export const MOVEMENT_LABEL: Record<string, string> = { receipt: 'Réception', import: 'Intégration d’importation', delivery: 'Livraison', delivery_cancel: 'Annulation de livraison', transfer_out: 'Transfert (sortie)', transfer_in: 'Transfert (entrée)', inventory_in: 'Inventaire (écart +)', inventory_out: 'Inventaire (écart −)', manual_in: 'Entrée manuelle', manual_out: 'Sortie manuelle', customer_return: 'Retour client' };
 const COST_REASON: Record<string, string> = { goods_receipt: 'Réception', import_integration: 'Intégration d’importation', manual_recalculation: 'Recalcul manuel', initial: 'Coût initial' };
 export const STATUS_LABEL: Record<string, string> = {
   draft: 'Brouillon', confirmed: 'Confirmée', partially_received: 'Partiellement reçue', received: 'Reçue', cancelled: 'Annulé', validated: 'Validé', pending: 'En attente', sent: 'Envoyé', accepted: 'Accepté', refused: 'Refusé', expired: 'Expiré', converted: 'Converti',
