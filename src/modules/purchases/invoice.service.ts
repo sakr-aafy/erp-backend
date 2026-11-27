@@ -11,6 +11,7 @@ import { ensureCounter, nextDocumentNumber } from '../../services/numbering.serv
 import { startOfDay } from '../../services/fiscal.service.js';
 import { rangeFilter } from '../sales/document.http.js';
 import { buildPurchaseLines, loadSupplier, purchaseLineBody } from './purchase.builder.js';
+import { carriedOver } from '../products/units.js';
 
 type Id = Types.ObjectId; type Lean = PurchaseInvoiceDoc & { _id: Id; createdAt?: Date };
 export const invoiceBody = z.object({ supplierId: objectId, purchaseOrderId: objectId.optional(), supplierInvoiceNumber: z.string().trim().min(1).max(60), invoiceDate: z.coerce.date().optional(), dueDate: z.coerce.date().optional(),
@@ -34,12 +35,14 @@ export const get = async (c: Id, id: string) => toDto(await getOwn(c, id));
 
 async function build(companyId: Id, b: Body, session: ClientSession) {
   const sup = await loadSupplier(companyId, b.supplierId, session, true); const date = startOfDay(b.invoiceDate ?? new Date());
+  let exempt: ((l: Body['lines'][number]) => boolean) | undefined;
   if (b.purchaseOrderId) {
     const po = await PurchaseOrder.findOne({ _id: b.purchaseOrderId, companyId }).session(session).lean();
     if (!po || String(po.supplierId) !== String(sup._id)) throw AppError.badRequest('Commande introuvable pour ce fournisseur');
     if (b.lines.some((l) => !l.orderLineId)) throw AppError.badRequest('Chaque ligne doit référencer une ligne de la commande');
+    exempt = (l) => { const ol = po.lines.find((x) => String((x as { _id: Id })._id) === l.orderLineId); return !!ol && carriedOver(l.quantity, ol.quantity, ol.receivedQty, (ol.receivedQty ?? 0) - (ol.invoicedQty ?? 0)); };
   }
-  const built = await buildPurchaseLines(companyId, b.lines, date, session);
+  const built = await buildPurchaseLines(companyId, b.lines, date, session, { ...(exempt && { exempt }) });
   return { sup, date, ...built };
 }
 export async function create(companyId: Id, userId: Id, b: Body) {

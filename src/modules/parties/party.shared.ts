@@ -16,9 +16,11 @@ export const addressSchema = new Schema(
   { _id: false },
 );
 
+/** E-mail : espaces inutiles retirés avant contrôle du format. */
+const emailZ = z.preprocess((v) => (typeof v === 'string' ? v.trim() : v), z.email());
 export const contactZ = z.object({
   _id: z.string().optional(), name: z.string().trim().min(1).max(100), role: z.string().trim().max(80).optional(),
-  email: z.email().optional().or(z.literal('').transform(() => undefined)), phone: z.string().trim().max(30).optional(), isPrimary: z.boolean().optional(),
+  email: z.preprocess((v) => (typeof v === 'string' ? v.trim() || undefined : v), z.email().optional()), phone: z.string().trim().max(30).optional(), isPrimary: z.boolean().optional(),
 }).strict();
 export const addressZ = z.object({
   street: z.string().trim().max(200).optional(), city: z.string().trim().max(80).optional(),
@@ -32,7 +34,7 @@ export const partyFields = {
   taxId: z.string().trim().max(40).nullable().optional().or(z.literal('').transform(() => undefined)),
   address: addressZ.optional(),
   phone: z.string().trim().max(30).nullable().optional(),
-  email: z.email().nullable().optional().or(z.literal('').transform(() => undefined)),
+  email: emailZ.nullable().optional().or(z.literal('').transform(() => undefined)),
   contacts: z.array(contactZ).max(20).optional(),
   paymentTerms: z.string().trim().max(80).nullable().optional(),
   paymentDelayDays: z.number().int().min(0).max(365).optional(),

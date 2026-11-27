@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { app, authed, binaryParser, login, makeUser, parseXlsx, setupDb, teardownDb } from './helpers.js';
-import { J, line, logisticsCompany, plusDays, quoteBody, stockIn, stockOut, today, type LCtx } from './sales.helpers.js';
+import { J, line, logisticsCompany, plusDays, quoteBody, stockIn, stockOut, today, type LCtx, acceptQuote, refuseQuote } from './sales.helpers.js';
 import { AuditLog } from '../src/models/audit-log.model.js';
 import { Product } from '../src/models/product.model.js';
 import { periods } from '../src/modules/reports/reports.dashboard.js';
@@ -24,8 +24,8 @@ beforeAll(async () => {
   const c = await A.j.post(`/invoices/${inv1}/credit-note`, { reason: 'Retour' }); cn = c.body.id; expect((await A.j.post(`/invoices/${cn}/validate`)).status).toBe(200);
   expect((await A.j.post(`/invoices/${inv2}/payments`, { amountMinor: 40_000, method: 'transfer', treasuryAccountId: bank })).status).toBe(201);
   // Devis : accepté + converti en facture, refusé, en attente
-  const q1 = (await A.j.post('/quotations', quoteBody(A, [line(A.products.a19, 1)]))).body; await A.j.post(`/quotations/${q1.id}/accept`); expect((await A.j.post(`/quotations/${q1.id}/convert-invoice`)).status).toBe(201);
-  const q2 = (await A.j.post('/quotations', quoteBody(A, [line(A.products.a19, 1)]))).body; await A.j.post(`/quotations/${q2.id}/refuse`); await A.j.post('/quotations', quoteBody(A, [line(A.products.a19, 1)]));
+  const q1 = (await A.j.post('/quotations', quoteBody(A, [line(A.products.a19, 1)]))).body; await acceptQuote(A.j, q1.id); const pro = (await A.j.post(`/quotations/${q1.id}/convert-proforma`)).body; expect((await A.j.post(`/proformas/${pro.proformaId}/convert-invoice`)).status).toBe(201);
+  const q2 = (await A.j.post('/quotations', quoteBody(A, [line(A.products.a19, 1)]))).body; await refuseQuote(A.j, q2.id); await A.j.post('/quotations', quoteBody(A, [line(A.products.a19, 1)]));
   // Stock : +10 à 1 000, −4 ; réception partielle d'une commande (6 sur 10 à 10 000) ; seuil minimum ; transfert
   await stockIn(A, A.products.a19, 10, 1_000); await stockOut(A, A.products.a19, 4);
   const po = (await A.j.post('/purchase-orders', { supplierId: A.supplierId, lines: [{ productId: A.products.a19, quantity: 10, unitPriceMinor: 10_000 }] })).body; await A.j.post(`/purchase-orders/${po.id}/confirm`);
@@ -98,7 +98,7 @@ describe('rapports commerciaux — chiffres exacts', () => {
     const b = await rep(A, 'sales-by-user', RANGE); expect(b.rows).toHaveLength(1); expect(b.rows[0]).toMatchObject({ invoices: 2, creditNotes: 1, htMinor: 300_000 });
   });
   it('devis : statuts, taux d’acceptation et de transformation', async () => {
-    const b = await rep(A, 'quotations', RANGE); expect(b.totals.count).toBe(3); const n = (s: string) => b.rows.find((r: { statusKey: string }) => r.statusKey === s).count; expect([n('pending'), n('accepted'), n('refused'), n('expired')]).toEqual([1, 1, 1, 0]);
+    const b = await rep(A, 'quotations', RANGE); expect(b.totals.count).toBe(3); const n = (s: string) => b.rows.find((r: { statusKey: string }) => r.statusKey === s).count; expect([n('draft'), n('sent'), n('accepted'), n('refused'), n('expired'), n('cancelled')]).toEqual([1, 0, 1, 1, 0, 0]);
     const k = Object.fromEntries(b.kpis.map((x: { label: string; value: number }) => [x.label, x.value])); expect(k['Taux d’acceptation']).toBe(50); expect(k['Devis transformés (proforma ou facture)']).toBe(1); expect(k['Taux de transformation']).toBeCloseTo(33.3, 1);
     expect((await rep(A, 'quotations', `${RANGE}&status=refused`)).totals.count).toBe(1);
   });

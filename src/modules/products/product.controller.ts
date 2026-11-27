@@ -52,7 +52,7 @@ export async function remove(req: Request, res: Response) {
 export async function exportList(req: Request, res: Response) {
   const q = req.query as unknown as svc.ProductFilters & { format: ExportFormat }; const ac = access(req);
   const rows = await svc.exportRows(cid(req), q, ac); const cfg = await Setting.findOne({ companyId: cid(req) }).lean();
-  const cols = svc.exportColumns(await decimalsOf(req), ac, q.format === 'pdf', Object.fromEntries((cfg?.currencies ?? []).map((c) => [c.code, c.decimals])));
+  const cols = svc.exportColumns(await decimalsOf(req), ac, q.format === 'pdf', Object.fromEntries((cfg?.currencies ?? []).map((c) => [c.code, c.decimals])), cfg?.baseCurrency ?? 'TND');
   // PDF : les colonnes d'achat détaillées sont réservées au tableur (largeur de page)
   const out = await renderTable(q.format, 'catalogue-produits', 'Catalogue produits', `${rows.length} article(s) — édité le ${new Date().toLocaleDateString('fr-FR')}`, q.format === 'pdf' ? cols.filter((c) => !['cur', 'foreign', 'estp'].includes(c.key)) : cols, rows);
   await audit(req, { action: 'export', resource: 'product', meta: { format: q.format, count: rows.length } }); send(res, out);
@@ -67,7 +67,7 @@ export async function fichePdf(req: Request, res: Response) {
   const purchaseRows: [string, string][] = !ac.purchase ? [] : rows([
     !p.purchaseCurrency && ['Prix d’achat HT', `${m(p.purchasePriceMinor)} ${base}`],
     !!p.purchaseCurrency && ['Devise d’achat', p.purchaseCurrency!], !!p.purchaseCurrency && ['Prix d’achat HT en devise', fx(p.purchasePriceForeignMinor, p.purchaseCurrency!)],
-    !!p.estimateRate && ['Taux de change estimatif', `1 ${p.purchaseCurrency} = ${p.estimateRate} ${base} (estimation uniquement)`], !!p.estimateRate && ['Contre-valeur estimée', `${m(p.estimatedPurchaseMinor)} ${base}`],
+    !!p.estimateRate && ['Taux de change estimatif', `1 ${p.purchaseCurrency} = ${p.estimateRate} ${base} (estimation uniquement)`], !!p.estimateRate && [`Coût d’achat HT en ${base === 'TND' ? 'DT' : base}`, `${m(p.estimatedPurchaseMinor)} ${base}`],
     !!p.purchaseRate && ['Contre-valeur au taux réel enregistré', `${m(p.purchasePriceMinor)} ${base} (1 ${p.purchaseCurrency} = ${p.purchaseRate} ${base})`],
     ['Fournisseur habituel', p.mainSupplierName ?? '—'], ['Coût de revient estimé', `${m(p.estimatedCostValueMinor)} ${base}${p.estimatedCostMinor == null ? '' : ' (saisi)'}`],
   ]);
@@ -77,7 +77,7 @@ export async function fichePdf(req: Request, res: Response) {
     ...(pk ? [{ title: 'Dimensions et Poids', rows: rows([['Dimensions (mm)', [pk.lengthMm, pk.widthMm, pk.heightMm].every((x) => x != null) ? `${pk.lengthMm} × ${pk.widthMm} × ${pk.heightMm}` : '—'], ['Poids net / brut (kg)', `${n(pk.netWeightKg)} / ${n(pk.grossWeightKg)}`], ['Type d’emballage', pk.typeLabel ?? pk.type ?? '—'],
       ['Volume total (m³)', volume], !!pk.review && ['À vérifier', `Ancienne saisie pour ${pk.review!.parcelCount} colis : dimensions à confirmer`]]) }] : []),
     { title: 'Prix', rows: [...purchaseRows, ['Prix de vente HT', m(p.salePriceMinor)], ['TVA', p.vatRatePct == null ? p.vatRateCode : `${p.vatRateCode} (${p.vatRatePct} %)`], ['Prix de vente TTC', m(p.saleTtcMinor)], ['Prix minimum de vente HT', m(p.minSalePriceMinor)], ['Remise maximale', n(p.maxDiscountPct, ' %')],
-      ...(ac.cost ? [['Coût de revient réel', p.costPriceMinor == null ? 'Pas encore calculé' : m(p.costPriceMinor)], ['Marge HT', `${m(p.marginMinor)} (marge ${n(p.marginRatePct, ' %')}, marque ${n(p.markPct, ' %')})`]] as [string, string][] : [])] },
+      ...(ac.cost ? [['Coût de revient réel', p.costPriceMinor == null ? 'Pas encore calculé' : m(p.costPriceMinor)], ['Marge HT', `${m(p.marginMinor)} (taux de marge sur coût ${n(p.marginRatePct, ' %')} ; sur prix de vente ${n(p.markPct, ' %')})`]] as [string, string][] : [])] },
     ...(ac.customs && p.customs ? [{ title: 'Douane', rows: [['Code NGP fournisseur', p.customs.supplierHsCode ?? '—'], ['Code NGP tunisien', p.customs.tnHsCode ?? '—'], ['DD / FODEC / RPD (%)', `${n(p.customs.ddPct)} / ${n(p.customs.fodecPct)} / ${n(p.customs.rpdPct)}`], ['TVA', p.vatRatePct == null ? p.vatRateCode : `${p.vatRatePct} %`], ['Pays d’origine', p.customs.originCountry ?? '—'], ['Pays de provenance', p.customs.provenanceCountry ?? '—'], ['Règlement particulier', p.customs.specialRegulation ?? '—']] as [string, string][] }] : []),
   ];
   const body = await toPdfFiche(`Fiche article — ${p.reference}`, sections);
@@ -122,12 +122,8 @@ export async function restoreCategory(req: Request, res: Response) {
   const c = await cat.setCategoryArchived(cid(req), pid(req), false); await audit(req, { action: 'reactivate', resource: 'category', resourceId: c.id, meta: { name: c.name } }); res.json(c);
 }
 export const listUnits = async (req: Request, res: Response) => res.json(await cat.listUnits(cid(req)));
-export async function createUnit(req: Request, res: Response) {
-  const u = await cat.createUnit(cid(req), req.body); await audit(req, { action: 'create', resource: 'unit', resourceId: u.id, meta: { code: u.code } }); res.status(201).json(u);
-}
-export async function updateUnit(req: Request, res: Response) {
-  const u = await cat.updateUnit(cid(req), pid(req), req.body); await audit(req, { action: 'update', resource: 'unit', resourceId: u.id }); res.json(u);
-}
+export const createUnit = async () => cat.createUnit();
+export const updateUnit = async () => cat.updateUnit();
 export async function deleteUnit(req: Request, res: Response) {
   const u = await cat.deleteUnit(cid(req), pid(req)); await audit(req, { action: 'delete', resource: 'unit', resourceId: pid(req), meta: { code: u.code } }); res.status(204).end();
 }

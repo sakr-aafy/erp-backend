@@ -266,7 +266,7 @@ describe('fiche article — transactions', () => {
   it('filtres : groupe, type, statut, période, référence, entrepôt ; pagination et ordre chronologique', async () => {
     const g = async (qs: string) => (await A.j.get(`/products/${t}/transactions?${qs}&limit=100`)).body;
     expect((await g('group=sales')).items.every((r: { group: string }) => r.group === 'sales')).toBe(true); expect((await g('group=purchases')).total).toBe(2); // commande + réception
-    expect((await g('type=quotation&status=pending')).total).toBe(1); expect((await g('type=invoice&status=paid')).total).toBe(0); expect((await g('status=pending')).items.every((r: { kind: string }) => ['quotation', 'proforma'].includes(r.kind))).toBe(true);
+    expect((await g('type=quotation&status=draft')).total).toBe(1); expect((await g('type=invoice&status=paid')).total).toBe(0); expect((await g('status=pending')).items.every((r: { kind: string }) => r.kind === 'proforma')).toBe(true);
     expect((await g(`from=${plusDays(2)}`)).total).toBe(0); expect((await g('warehouseId=' + A.w2)).items.filter((r: { kind: string }) => r.kind === 'goods_receipt')).toHaveLength(0);
     const ref = (await A.j.get(`/purchase-orders/${(await g('type=purchase_order')).items[0].id ?? ''}`)); void ref;
     const dates = (await g('')).items.map((r: { date: string }) => +new Date(r.date)); expect(dates).toEqual([...dates].sort((a, b) => b - a));
@@ -404,7 +404,7 @@ describe('fiche article — permissions par donnée sensible', () => {
     const pdf = await api().get(`/api/v1/products/${id2}/pdf`).set(authed(A.token)).buffer().parse(binaryParser); expect(pdf.status).toBe(200); expect(pdf.headers['content-type']).toMatch(/pdf/); expect((pdf.body as Buffer).subarray(0, 4).toString()).toBe('%PDF'); expect(pdf.headers['content-disposition']).toContain('fiche-article-MACH-0001');
     const x = await api().get('/api/v1/products/export?format=xlsx').set(authed((await login('lect@a.test')).token)).buffer().parse(binaryParser); const rows = await parseXlsx(x.body as Buffer);
     expect(rows[0]).not.toContain('Prix d\'achat HT'); expect(rows[0]).not.toContain('Coût de revient'); expect(rows[0]).toContain('Prix de vente HT');
-    const full = await parseXlsx(((await api().get('/api/v1/products/export?format=xlsx').set(authed(A.token)).buffer().parse(binaryParser)).body) as Buffer); expect(full[0]).toContain('Prix d\'achat HT'); expect(full[0]).toEqual(expect.arrayContaining(['Code article', 'Désignation', 'Catégorie', 'Sous-catégorie', 'Devise d\'achat', 'Contre-valeur estimée', 'Coût de revient estimé', 'Stock disponible', 'Statut']));
+    const full = await parseXlsx(((await api().get('/api/v1/products/export?format=xlsx').set(authed(A.token)).buffer().parse(binaryParser)).body) as Buffer); expect(full[0]).toContain('Prix d\'achat HT'); expect(full[0]).toEqual(expect.arrayContaining(['Code article', 'Désignation', 'Catégorie', 'Sous-catégorie', 'Devise d\'achat', 'Coût d\'achat HT en DT', 'Coût de revient estimé', 'Stock disponible', 'Statut']));
     expect(full[0]).not.toContain('Marque'); expect(full[0]).not.toContain('Modèle');
     void L;
   });

@@ -255,7 +255,7 @@ describe('taux de change estimatif', () => {
     expect((await B.j.get('/products?sort=-purchasePriceMinor')).body.items.map((x: { id: string }) => x.id)).toEqual([high.id, mid.id, cheap.id]);
     const rows = await parseXlsx(await text('/products/export?format=xlsx', B)); const at = (h: string) => rows[0]!.indexOf(h);
     const line = rows.find((r) => r[0] === mid.reference)!;
-    expect(line[at('Prix d\'achat HT')] ?? '').toBe(''); expect(Number(line[at('Prix d\'achat en devise')])).toBe(100); expect(Number(line[at('Contre-valeur estimée')])).toBe(350);
+    expect(line[at('Prix d\'achat HT')] ?? '').toBe(''); expect(Number(line[at('Prix d\'achat en devise')])).toBe(100); expect(Number(line[at('Coût d\'achat HT en DT')])).toBe(350);
     const pdf = pdfText(await text(`/products/${mid.id}/pdf`, B)); expect(pdf).toContain('1 EUR = 3.5 TND'); expect(pdf).toContain('350.000');
   });
   it('modification du paramètre : réservée, auditée, appliquée à l’estimation seulement', async () => {

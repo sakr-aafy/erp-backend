@@ -6,6 +6,7 @@ import { escapeRegex } from '../../utils/pagination.js';
 import { thirdPartyStatement } from '../accounting/accounting.service.js';
 import { getOwn, toDto } from './customer.service.js';
 import { expireOverdue as expireQuotations } from '../quotations/quotation.service.js';
+import { QUOTATION_STATUSES, statusOf, storedStatuses, type QuotationStatus } from '../quotations/quotation.workflow.js';
 
 type Id = Types.ObjectId;
 export type DocKind = 'quotation' | 'proforma' | 'invoice' | 'credit_note' | 'delivery_note';
@@ -27,12 +28,12 @@ export interface Row {
 interface DocLean { _id: Id; number?: string | null; status: string; issueDate?: Date; deliveryDate?: Date; totals?: { totalHtMinor?: number | null; totalTtcMinor?: number | null; totalPayableMinor?: number | null } | null; type?: string; paymentStatus?: string | null }
 const toRow = (kind: DocKind, d: DocLean): Row => ({
   id: d._id.toString(), kind, number: d.number ?? null, date: (d.issueDate ?? d.deliveryDate)!, totalHtMinor: d.totals?.totalHtMinor ?? null, totalTtcMinor: d.totals?.totalTtcMinor ?? null,
-  payableMinor: d.totals?.totalPayableMinor ?? null, status: d.status, paymentStatus: d.paymentStatus ?? null, pdfPath: `${PDF_PATH[kind]}/${d._id}/pdf`, webPath: `${WEB_PATH[kind]}/${d._id}`,
+  payableMinor: d.totals?.totalPayableMinor ?? null, status: kind === 'quotation' ? statusOf(d.status) : d.status, paymentStatus: d.paymentStatus ?? null, pdfPath: `${PDF_PATH[kind]}/${d._id}/pdf`, webPath: `${WEB_PATH[kind]}/${d._id}`,
 });
 
 /** Statuts filtrables par type de document (un statut qui n'existe pas pour un type exclut ce type de la recherche). */
 const STATUSES: Record<DocKind, string[]> = {
-  quotation: ['pending', 'sent', 'accepted', 'refused', 'expired'], proforma: ['pending', 'converted', 'expired', 'cancelled'],
+  quotation: [...QUOTATION_STATUSES], proforma: ['pending', 'converted', 'expired', 'cancelled'],
   invoice: ['draft', 'validated', 'unpaid', 'partial', 'paid'], credit_note: ['draft', 'validated'], delivery_note: ['draft', 'validated', 'cancelled'],
 };
 
@@ -41,7 +42,7 @@ function kindFilter(kind: DocKind, companyId: Id, customerId: string, f: { statu
   if (kind === 'invoice' || kind === 'credit_note') filter.type = kind;
   if (f.status) {
     if (!STATUSES[kind].includes(f.status)) return null;
-    if (kind === 'invoice' && ['unpaid', 'partial', 'paid'].includes(f.status)) { filter.status = 'validated'; filter.paymentStatus = f.status; } else filter.status = f.status;
+    if (kind === 'invoice' && ['unpaid', 'partial', 'paid'].includes(f.status)) { filter.status = 'validated'; filter.paymentStatus = f.status; } else filter.status = kind === 'quotation' ? { $in: storedStatuses(f.status as QuotationStatus) } : f.status;
   }
   const dateField = kind === 'delivery_note' ? 'deliveryDate' : 'issueDate';
   if (f.from || f.to) filter[dateField] = { ...(f.from && { $gte: f.from }), ...(f.to && { $lte: f.to }) };

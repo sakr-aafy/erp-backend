@@ -19,6 +19,12 @@ export interface PdfDoc {
   withholdingLabel?: string; showPrices?: boolean; schedule?: { dueDate: Date; amountMinor: number; percent?: number | null | undefined }[]; notes?: string | null | undefined; terms?: string | null | undefined;
   extra?: [string, string][];
   paymentTerms?: string | null | undefined;
+  /** Texte libre (devis, proforma) : imprimé tel quel, jamais converti en date. */
+  deliveryTime?: string | null | undefined;
+  /** Devis : numéro de la version imprimée. */
+  version?: number | undefined;
+  /** Devis antérieur : remise globale en % appliquée au total, nommée comme telle au récapitulatif. */
+  legacyDiscountPct?: number | null | undefined;
   deliveryAddress?: { label?: string | null | undefined; street?: string | null | undefined; city?: string | null | undefined; postalCode?: string | null | undefined; country?: string | null | undefined;
     contactName?: string | null | undefined; contactPhone?: string | null | undefined; instructions?: string | null | undefined } | null | undefined;
 }
@@ -44,6 +50,7 @@ export async function renderDocumentPdf(companyId: Types.ObjectId, d: PdfDoc): P
   doc.font('Helvetica').fontSize(9).fillColor('#444').text([company?.address, company?.phone, company?.email, company?.taxId ? `MF : ${company.taxId}` : ''].filter(Boolean).join('\n'), L, doc.y, { width: W / 2 });
   doc.fillColor('#000').font('Helvetica-Bold').fontSize(18).text(d.title, L + W / 2, 40, { width: W / 2, align: 'right' });
   doc.fontSize(11).text(d.draft ? 'BROUILLON' : (d.number ?? ''), L + W / 2, doc.y, { width: W / 2, align: 'right' });
+  if (d.version) doc.font('Helvetica').fontSize(9).text(`Version ${d.version}`, L + W / 2, doc.y, { width: W / 2, align: 'right' });
   doc.font('Helvetica').fontSize(9).text(`Date : ${dt(d.date)}`, L + W / 2, doc.y, { width: W / 2, align: 'right' });
   if (d.secondaryDate) doc.text(`${d.secondaryDateLabel} : ${dt(d.secondaryDate)}`, L + W / 2, doc.y, { width: W / 2, align: 'right' });
   for (const [k, v] of d.extra ?? []) doc.text(`${k} : ${v}`, L + W / 2, doc.y, { width: W / 2, align: 'right' });
@@ -85,8 +92,8 @@ export async function renderDocumentPdf(companyId: Types.ObjectId, d: PdfDoc): P
     if (doc.y > doc.page.height - 200) { doc.addPage(); head(); }
     const y = doc.y; let x = L;
     const vals = showPrices
-      ? [l.reference ?? '', l.designation, String(l.quantity), m(l.unitPriceMinor), l.discountPct ? String(l.discountPct) : '', l.vat.regime === 'taxable' ? `${l.vat.ratePct}%` : (REGIME[l.vat.regime ?? ''] ?? '—').replace('TVA ', ''), m(l.netHtMinor)]
-      : [l.reference ?? '', l.designation, l.unit ?? '', String(l.quantity)];
+      ? [l.reference ?? '', l.designation, fr(l.quantity, 3), m(l.unitPriceMinor), l.discountPct ? fr(l.discountPct, 2) : '', l.vat.regime === 'taxable' ? `${l.vat.ratePct}%` : (REGIME[l.vat.regime ?? ''] ?? '—').replace('TVA ', ''), m(l.netHtMinor)]
+      : [l.reference ?? '', l.designation, l.unit ?? '', fr(l.quantity, 3)];
     let h = 12;
     cols.forEach((c, i) => { const t = vals[i]!; const hh = doc.heightOfString(t, { width: c.w - 6 }); h = Math.max(h, hh); doc.text(t, x + 3, y, { width: c.w - 6, align: c.r ? 'right' : 'left' }); x += c.w; });
     doc.y = y + h + 4; doc.moveTo(L, doc.y - 2).lineTo(R, doc.y - 2).stroke('#e5e8ee');
@@ -101,7 +108,9 @@ export async function renderDocumentPdf(companyId: Types.ObjectId, d: PdfDoc): P
     doc.moveDown(0.6); const ty = doc.y; const tx = L + W - 230;
     const row = (k: string, v: string, bold = false) => { const y = doc.y; doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(bold ? 10 : 9).text(k, tx, y, { width: 130 }); doc.text(v, tx + 130, y, { width: 100, align: 'right' }); doc.y = y + (bold ? 15 : 13); };
     const t = d.totals;
-    if ((t.lineDiscountsMinor ?? 0) + (t.globalDiscountMinor ?? 0) > 0) row('Remises', `- ${m((t.lineDiscountsMinor ?? 0) + (t.globalDiscountMinor ?? 0))}`);
+    // Devis : les remises de ligne et la remise supplémentaire sont présentées séparément
+    if (quote) { if ((t.lineDiscountsMinor ?? 0) > 0) row('Remises sur les lignes', `- ${m(t.lineDiscountsMinor)}`); if ((t.globalDiscountMinor ?? 0) > 0) row((d.legacyDiscountPct ?? 0) > 0 ? `Remise globale (${fr(d.legacyDiscountPct!, 2)} %)` : 'Remise supplémentaire', `- ${m(t.globalDiscountMinor)}`); }
+    else if ((t.lineDiscountsMinor ?? 0) + (t.globalDiscountMinor ?? 0) > 0) row('Remises', `- ${m((t.lineDiscountsMinor ?? 0) + (t.globalDiscountMinor ?? 0))}`);
     row('Total HT', m(t.totalHtMinor));
     for (const g of t.vatGroups ?? []) row(g.regime === 'taxable' ? `TVA ${g.ratePct} % (base ${m(g.baseMinor)})` : `${REGIME[g.regime ?? ''] ?? g.vatCode} (base ${m(g.baseMinor)})`, g.regime === 'taxable' ? m(g.vatMinor) : '—');
     row('Total TVA', m(t.totalVatMinor)); row('Total TTC', m(t.totalTtcMinor), true);
@@ -113,6 +122,7 @@ export async function renderDocumentPdf(companyId: Types.ObjectId, d: PdfDoc): P
     if (d.schedule?.length) { doc.moveDown(0.5).font('Helvetica-Bold').fontSize(9).text('Échéancier', L); doc.font('Helvetica'); for (const s of d.schedule) doc.text(`${dt(s.dueDate)} — ${d.draft && !s.amountMinor ? `${s.percent ?? 0} %` : `${m(s.amountMinor)} ${cur}`}`, L); }
   }
   if (d.paymentTerms) doc.moveDown().font('Helvetica').fontSize(8.5).fillColor('#444').text(`Conditions de paiement : ${d.paymentTerms}`, L, doc.y, { width: W });
+  if (d.deliveryTime) doc.moveDown(0.6).font('Helvetica').fontSize(8.5).fillColor('#444').text(`Délai de livraison : ${d.deliveryTime}`, L, doc.y, { width: W });
   if (d.terms) doc.moveDown().font('Helvetica').fontSize(8.5).fillColor('#444').text(`Conditions : ${d.terms}`, L, doc.y, { width: W });
   if (d.notes) doc.moveDown(0.5).fillColor('#444').text(d.notes, L, doc.y, { width: W });
   const pages = quote ? doc.bufferedPageRange().count : 1;

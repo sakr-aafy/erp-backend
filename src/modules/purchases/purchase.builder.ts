@@ -8,6 +8,7 @@ import { minorInt } from '../parties/party.shared.js';
 import { CalculationError, computeDocument, type CalcLine, type DocTotals, type VatRegime } from '../../services/calculation.service.js';
 import { resolveVat } from '../../services/fiscal.service.js';
 import { realPurchaseMinor } from '../products/purchase-price.js';
+import { assertQuantities } from '../products/units.js';
 
 type Id = Types.ObjectId;
 export const purchaseLineBody = z.object({
@@ -27,10 +28,11 @@ export async function loadSupplier(companyId: Id, id: string | Id, session?: Cli
 }
 
 /** Lignes d'achat : prix d'achat et TVA de l'article par défaut (TVA résolue par les règles fiscales validées), totaux via le service de calcul unique. */
-export async function buildPurchaseLines(companyId: Id, lines: PurchaseLineInput[], date: Date, session?: ClientSession, opts: { checkStatus?: boolean } = {}) {
+export async function buildPurchaseLines(companyId: Id, lines: PurchaseLineInput[], date: Date, session?: ClientSession, opts: { checkStatus?: boolean; exempt?: (l: PurchaseLineInput) => boolean } = {}) {
   const ids = [...new Set(lines.map((l) => l.productId).filter(Boolean) as string[])];
   const products = ids.length ? await Product.find({ _id: { $in: ids }, companyId }).session(session ?? null).populate('unitId', 'code').lean() : [];
   const byId = new Map(products.map((p) => [p._id.toString(), p])); const cache = new Map<string, Awaited<ReturnType<typeof resolveVat>>>();
+  await assertQuantities(companyId, lines.map((l) => ({ productId: l.productId, quantity: l.quantity, exempt: opts.exempt?.(l) })), session);
   const built: BuiltPurchaseLine[] = [];
   for (const [i, l] of lines.entries()) {
     const p = l.productId ? byId.get(l.productId) : undefined;

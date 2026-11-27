@@ -8,6 +8,8 @@ import { withTransaction } from '../../utils/transaction.js';
 import { ALL_PERMISSIONS } from '../../config/permissions.js';
 import { AppError } from '../../utils/errors.js';
 import { initSupplierCategories } from '../suppliers/supplier.categories.js';
+import { ensureFixedUnits } from '../products/units.js';
+import { ensurePaymentTerms } from '../payment-terms/payment-term.service.js';
 
 export const ADMIN_ROLE_NAME = 'Administrateur';
 
@@ -30,6 +32,8 @@ export async function createCompanyWithAdmin(input: NewCompanyInput) {
     return { company: company!, role: role!, user: user! };
   });
   await initSupplierCategories(created.company._id); // catégories de fournisseurs proposées (administrables ensuite)
+  await ensureFixedUnits(created.company._id); // les trois unités de mesure proposées
+  await ensurePaymentTerms(created.company._id); // conditions de paiement proposées (administrables ensuite)
   return created;
 }
 

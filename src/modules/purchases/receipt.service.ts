@@ -13,6 +13,7 @@ import { startOfDay } from '../../services/fiscal.service.js';
 import { Supplier } from '../../models/supplier.model.js';
 import { resolveAddress, type AddressSnapshot } from '../parties/delivery-address.js';
 import { addressesDto, receivingSnapshot } from './purchase.addresses.js';
+import { assertQuantities, carriedOver } from '../products/units.js';
 
 type Id = Types.ObjectId; type Lean = GoodsReceiptDoc & { _id: Id; createdAt?: Date };
 export const receiptBody = z.object({
@@ -52,6 +53,7 @@ async function prepare(companyId: Id, b: Body, session: ClientSession) {
     const net = ol.netHtMinor ?? 0; const value = l.quantity >= remaining - 1e-9 ? net - (ol.receivedValueMinor ?? 0) : proportion(net, l.quantity, ol.quantity);
     lines.push({ orderLineId: (ol as { _id: Id })._id, productId: ol.productId, designation: ol.designation, quantity: l.quantity, unitCostMinor: Math.round(value / l.quantity), valueMinor: value, serials: l.serials ?? [] });
   }
+  await assertQuantities(companyId, b.lines.map((l) => { const ol = po.lines.find((x) => (x as { _id: Id })._id.toString() === l.orderLineId)!; return { productId: ol.productId, quantity: l.quantity, exempt: carriedOver(l.quantity, ol.quantity, ol.quantity - (ol.receivedQty ?? 0)) }; }), session);
   return { po, lines };
 }
 export async function list(companyId: Id, f: { status?: string | undefined; purchaseOrderId?: string | undefined; page: number; limit: number }) {

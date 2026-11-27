@@ -97,11 +97,11 @@ describe('totaux : plusieurs taux, jamais de taux par défaut', () => {
     const r = await A.j.post('/sales/calculate', { docType: 'quotation', customerId: A.customerId, lines: [line(A.products.a19, 1, { vatCode: 'EXO' }), line(A.products.b13, 1, { vatCode: 'T0' })] });
     expect(r.body.totals.totalVatMinor).toBe(0); expect(r.body.totals.vatGroups.map((g: { regime: string }) => g.regime)).toEqual(['exempt', 'zero']);
   });
-  it('remises de ligne et globale, arrondis en millimes', async () => {
-    const r = await A.j.post('/sales/calculate', { docType: 'quotation', customerId: A.customerId, globalDiscountPct: 10, lines: [{ designation: 'x', quantity: 3, unitPriceMinor: 12_345, discountPct: 12.5, vatCode: 'T19' }] });
+  it('remises de ligne et ancienne remise globale (aperçu), arrondis en millimes', async () => {
+    const r = await A.j.post('/sales/calculate', { docType: 'quotation', customerId: A.customerId, legacyGlobalDiscountPct: 10, lines: [{ designation: 'x', quantity: 3, unitPriceMinor: 12_345, discountPct: 12.5, vatCode: 'T19' }] });
     expect(r.body.lines[0].netHtMinor).toBe(32_406); expect(r.body.totals.globalDiscountMinor).toBe(3_241); expect(r.body.totals.totalHtMinor).toBe(29_165);
     expect(r.body.totals.totalVatMinor).toBe(5_541); // 29165 × 19 % = 5541,35
-    expect((await A.j.post('/sales/calculate', { docType: 'quotation', customerId: A.customerId, globalDiscountPct: 5, globalDiscountMinor: 100, lines: [line(A.products.a19)] })).status).toBe(422);
+    expect((await A.j.post('/sales/calculate', { docType: 'quotation', customerId: A.customerId, legacyGlobalDiscountPct: 5, globalDiscountMinor: 100, lines: [line(A.products.a19)] })).status).toBe(422);
   });
   it('le client ne peut imposer aucun montant calculé (champs inconnus refusés)', async () => {
     for (const bad of [{ totals: { totalHtMinor: 1 } }, { lines: [{ ...line(A.products.a19), netHtMinor: 1 }] }, { lines: [{ ...line(A.products.a19), vat: { ratePct: 0 } }] }]) {

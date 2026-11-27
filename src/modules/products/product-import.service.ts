@@ -2,6 +2,7 @@ import { Readable } from 'node:stream';
 import ExcelJS from 'exceljs';
 import type { Types } from 'mongoose';
 import { Category, Product, ProductActivity, Unit } from '../../models/product.model.js';
+import { ensureFixedUnits, matchFixed } from './units.js';
 import { FiscalRule } from '../../models/fiscal-rule.model.js';
 import { Setting } from '../../models/setting.model.js';
 import { Supplier } from '../../models/supplier.model.js';
@@ -106,9 +107,10 @@ export async function importProducts(companyId: Id, buffer: Buffer, filename: st
   for (const req of ['reference', 'name', 'unit', 'vat'] as const) if (col[req] === undefined) report.errors.push({ row: 1, field: req, message: `Colonne obligatoire manquante : ${req}` });
   if (report.errors.length) return report;
 
+  await ensureFixedUnits(companyId);
   const [settings, cats, units, suppliers, existing] = await Promise.all([
     Setting.findOne({ companyId }).lean(), Category.find({ companyId }).lean(), Unit.find({ companyId }).lean(),
-    Supplier.find({ companyId }).select('name taxId code isArchived status').lean(), Product.find({ companyId }).select('reference categoryId mainSupplierId purchaseCurrency purchasePriceForeignMinor').lean(),
+    Supplier.find({ companyId }).select('name taxId code isArchived status').lean(), Product.find({ companyId }).select('reference unitId categoryId mainSupplierId purchaseCurrency purchasePriceForeignMinor').lean(),
   ]);
   const decimals = settings?.currencies.find((c) => c.code === settings.baseCurrency)?.decimals ?? 3;
   const vatCodes = new Set((await FiscalRule.distinct('code', { companyId, kind: 'vat', status: 'validated' })) as string[]);
@@ -139,8 +141,12 @@ export async function importProducts(companyId: Id, buffer: Buffer, filename: st
     }
     const kindRaw = norm(get(r, 'kind'));
     if (kindRaw && !['produit', 'product', 'service'].includes(kindRaw)) err('kind', 'Type invalide (Produit ou Service)');
-    const unit = unitByCode.get(get(r, 'unit').toLowerCase());
-    if (!unit) err('unit', `Unité inconnue « ${get(r, 'unit')} » (à créer dans les catégories/unités)`);
+    const rawUnit = get(r, 'unit'); const current0 = get(r, 'reference') ? existingByRef.get(get(r, 'reference').toLowerCase()) : undefined;
+    const named = unitByCode.get(rawUnit.toLowerCase());
+    // Unité proposée (code ou nom : PC, Pièce, m, kg…) ou unité historique déjà portée par l'article mis à jour
+    const match = matchFixed(rawUnit, rawUnit);
+    const unit = named && (named.fixedKey || current0?.unitId?.equals(named._id)) ? named : match ? units.find((u) => u.fixedKey === match.key) : undefined;
+    if (!unit) err('unit', `Unité « ${rawUnit} » non proposée : utilisez Pièce (PC), Mètre (M) ou Kilogramme (KG)`);
     const vat = get(r, 'vat');
     if (!vat) err('vat', 'Code TVA obligatoire'); else if (!vatCodes.has(vat.toUpperCase())) err('vat', `Code TVA inconnu « ${vat} »`);
 
@@ -269,7 +275,7 @@ export async function buildTemplate(): Promise<Buffer> {
   const help = wb.addWorksheet('Aide');
   [['Colonne', 'Règle'],
     ['Référence', 'Obligatoire, unique dans la société.'], ['Désignation', 'Obligatoire.'], ['Type', 'Produit (défaut) ou Service.'],
-    ['Catégorie / Sous-catégorie', 'Doivent exister et être actives (Catégories & unités). La sous-catégorie doit appartenir à la catégorie.'], ['Unité', 'Code d\'une unité existante. Obligatoire.'],
+    ['Catégorie / Sous-catégorie', 'Doivent exister et être actives (Catégories & unités). La sous-catégorie doit appartenir à la catégorie.'], ['Unité', 'PC (Pièce), M (Mètre) ou KG (Kilogramme). Obligatoire.'],
     ['Prix d\'achat / Prix de vente', 'Montants dans la devise de base, ex. 12,500.'], ['Code TVA', 'Code d\'un taux configuré dans Paramètres. Obligatoire.'],
     ['Stock minimum', 'Nombre (défaut 0).'], ['Fournisseur', 'Code, matricule fiscal ou raison sociale d\'un fournisseur actif.'], ['Série', 'Oui / Non : suivi par numéro de série.'],
     ['Longueur / Largeur / Hauteur (mm)', 'Les trois ensemble ou aucune ; volume total (m³) = L × l × h / 1 000 000 000, calculé automatiquement.'], ['Poids net / brut (kg)', 'Positifs ; le poids brut ne peut pas être inférieur au poids net.'],

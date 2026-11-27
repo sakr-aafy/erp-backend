@@ -12,9 +12,10 @@ import { ensureCounter, nextDocumentNumber } from '../../services/numbering.serv
 import { startOfDay } from '../../services/fiscal.service.js';
 import { computeDocument, groupKey, type DocTotals, pctOf, proportion, type CalcLine, type VatRegime } from '../../services/calculation.service.js';
 import { assertCanSell } from '../customers/customer.service.js';
-import { buildDocument, frozenOf, inheritFrom, linesToInput, type BuiltLine, type DocInput, type Inherited, type LineInput } from '../sales/document.builder.js';
+import { buildDocument, discountsOf, frozenOf, inheritFrom, legacyDiscountOf, linesToInput, type BuiltLine, type DocInput, type Inherited, type LineInput } from '../sales/document.builder.js';
 import { snapshotDto } from '../parties/delivery-address.js';
 import { rangeFilter } from '../sales/document.http.js';
+import { assertQuantities, carriedOver } from '../products/units.js';
 
 type Id = Types.ObjectId;
 type Lean = InvoiceDoc & { _id: Id; createdAt?: Date };
@@ -28,7 +29,7 @@ export function toDto(i: Lean) {
   const overdue = balanceDue > 0 && i.schedule.some((s) => s.dueDate < today && open(s) > 0);
   return {
     id: i._id.toString(), paymentTerms: i.paymentTerms ?? null, paymentTermsCustom: !!i.paymentTermsCustom, deliveryAddress: snapshotDto(i.deliveryAddress as never), type: i.type, number: i.number ?? null, status: i.status, customerId: i.customerId.toString(), customer: i.customerSnapshot, issueDate: i.issueDate,
-    lines: i.lines.map((l) => ({ ...l, id: (l as { _id: Id })._id.toString() })), globalDiscountPct: i.globalDiscountPct, globalDiscountMinor: i.globalDiscountMinor,
+    lines: i.lines.map((l) => ({ ...l, id: (l as { _id: Id })._id.toString() })), globalDiscountPct: i.globalDiscountPct, syncDiscountPct: i.syncDiscountPct ?? 0, globalDiscountMinor: i.globalDiscountMinor,
     withholdingOperationType: i.withholdingOperationType ?? null, withholding: i.withholding ?? null, stamp: i.stamp ?? null, totals: i.totals, notes: i.notes ?? null,
     paymentMethod: i.paymentMethod ?? null, schedule: i.schedule.map((s) => ({ id: (s as { _id: Id })._id.toString(), dueDate: s.dueDate, percent: s.percent ?? null, amountMinor: s.amountMinor, paidMinor: s.paidMinor, creditedMinor: s.creditedMinor ?? 0, openMinor: open(s) })),
     /** Excédent : encaissé + crédité au-delà du montant de la facture (créance du client, à rembourser ou imputer). */
@@ -67,10 +68,11 @@ export async function createDraft(companyId: Id, userId: Id, b: InvoiceBody, sou
   const run = async (session: ClientSession) => {
     const issueDate = startOfDay(b.issueDate ?? new Date());
     const docType = sources.type === 'credit_note' ? 'creditNote' : 'invoice';
-    const doc = await buildDocument(companyId, docType, b, { date: issueDate, session, ...(sources.inherit && { inherit: sources.inherit }) });
+    const converted = !!(sources.quotationId || sources.proformaId || sources.deliveryNoteIds);
+    const doc = await buildDocument(companyId, docType, b, { date: issueDate, session, preserveQuantities: converted, ...(sources.inherit && { inherit: sources.inherit }) });
     if (sources.lineDeliveredFull) doc.lines.forEach((l) => { l.deliveredQty = l.quantity; });
     const [c] = await Invoice.create([{ companyId, type: sources.type ?? 'invoice', status: 'draft', customerId: doc.customer._id, customerSnapshot: doc.customerSnapshot, issueDate, paymentMethod: b.paymentMethod,
-      schedule: (b.schedule ?? []).map((s) => ({ dueDate: startOfDay(s.dueDate), percent: s.percent })), lines: doc.lines, globalDiscountPct: doc.globalDiscountPct, globalDiscountMinor: doc.globalDiscountMinor,
+      schedule: (b.schedule ?? []).map((s) => ({ dueDate: startOfDay(s.dueDate), percent: s.percent })), lines: doc.lines, globalDiscountPct: doc.globalDiscountPct, syncDiscountPct: doc.syncDiscountPct, globalDiscountMinor: doc.globalDiscountMinor,
       withholdingOperationType: doc.withholdingOperationType, withholding: doc.withholding, stamp: doc.stamp, totals: doc.totals, notes: b.notes, ...frozenOf(doc), createdBy: userId,
       ...(sources.quotationId && { quotationId: sources.quotationId }), ...(sources.proformaId && { proformaId: sources.proformaId }), ...(sources.deliveryNoteIds && { deliveryNoteIds: sources.deliveryNoteIds }),
       ...(sources.creditedInvoiceId && { creditedInvoiceId: sources.creditedInvoiceId, creditReason: sources.creditReason }) }] as never[], { session });
@@ -86,12 +88,14 @@ export async function updateDraft(companyId: Id, id: string, b: InvoiceBody) {
   const issueDate = startOfDay(b.issueDate ?? cur.issueDate);
   return withTransaction(async (session) => {
     const inherit = inheritFrom(cur, b.customerId);
-    const doc = await buildDocument(companyId, 'invoice', b, { date: issueDate, session, ...(inherit && { inherit }) });
+    // Facture issue de BL : les quantités livrées (inchangées) sont conservées même si elles datent d'avant les règles d'unités
+    const fromDeliveries = (cur.deliveryNoteIds ?? []).length > 0 && b.lines.every((l) => cur.lines.some((c) => String(c.productId ?? '') === (l.productId ?? '') && c.quantity === l.quantity));
+    const doc = await buildDocument(companyId, 'invoice', { ...b, ...legacyDiscountOf(cur, b) }, { date: issueDate, session, preserveQuantities: fromDeliveries, ...(inherit && { inherit }) });
     if ((cur.deliveryNoteIds ?? []).length) { // facture issue de BL : les lignes livrées restent liées
       doc.lines.forEach((l) => { l.deliveredQty = l.quantity; });
     }
     const u = await Invoice.findOneAndUpdate({ _id: id, companyId, status: 'draft' }, { $set: { customerId: doc.customer._id, customerSnapshot: doc.customerSnapshot, issueDate, paymentMethod: b.paymentMethod,
-      schedule: (b.schedule ?? []).map((s) => ({ dueDate: startOfDay(s.dueDate), percent: s.percent })), lines: doc.lines, globalDiscountPct: doc.globalDiscountPct, globalDiscountMinor: doc.globalDiscountMinor,
+      schedule: (b.schedule ?? []).map((s) => ({ dueDate: startOfDay(s.dueDate), percent: s.percent })), lines: doc.lines, globalDiscountPct: doc.globalDiscountPct, syncDiscountPct: doc.syncDiscountPct, globalDiscountMinor: doc.globalDiscountMinor,
       withholdingOperationType: doc.withholdingOperationType ?? null, withholding: doc.withholding ?? null, stamp: doc.stamp ?? null, totals: doc.totals, notes: b.notes, ...frozenOf(doc) } }, { returnDocument: 'after', session }).lean();
     if (!u) throw AppError.conflict('La facture a changé entre-temps');
     return toDto(u as Lean);
@@ -157,6 +161,7 @@ export async function createCreditNote(companyId: Id, userId: Id, invoiceId: str
     const credited = await creditedQuantities(companyId, inv._id, session);
     const wanted = b.lines ?? inv.lines.map((l) => ({ sourceLineId: (l as { _id: Id })._id.toString(), quantity: l.quantity - (credited.get((l as { _id: Id })._id.toString()) ?? 0) })).filter((x) => x.quantity > 1e-9);
     if (!wanted.length) throw AppError.conflict('Cette facture est déjà intégralement créditée');
+    await assertQuantities(companyId, wanted.map((w) => { const ol = inv.lines.find((x) => String((x as { _id: Id })._id) === w.sourceLineId); return { productId: ol?.productId, unit: ol?.unit, quantity: w.quantity, label: ol ? `« ${ol.designation} »` : undefined, exempt: !!ol && carriedOver(w.quantity, ol.quantity, ol.quantity - (credited.get(w.sourceLineId) ?? 0)) }; }), session);
     const doc = await buildCreditDocument(companyId, inv, wanted, session);
     const [c] = await Invoice.create([{ companyId, type: 'credit_note', status: 'draft', customerId: inv.customerId, customerSnapshot: inv.customerSnapshot, issueDate: startOfDay(new Date()), lines: doc.lines, withholdingOperationType: inv.withholdingOperationType,
       deliveryAddress: inv.deliveryAddress, paymentTerms: inv.paymentTerms, paymentTermsCustom: inv.paymentTermsCustom, withholding: doc.withholding, totals: doc.totals, notes: `Avoir sur facture ${inv.number}`, createdBy: userId, creditedInvoiceId: inv._id, creditReason: b.reason }] as never[], { session });
@@ -243,8 +248,8 @@ export async function validate(companyId: Id, userId: Id, id: string) {
       const built = await buildCreditDocument(companyId, orig, inv.lines.map((l) => ({ sourceLineId: l.sourceLineId!.toString(), quantity: l.quantity })), session, inv._id);
       doc = { ...built, customerSnapshot: inv.customerSnapshot };
     } else {
-      const input: DocInput = { customerId: inv.customerId, lines: linesToInput(inv.lines, false, 'keep'), globalDiscountPct: inv.globalDiscountPct ?? 0, globalDiscountMinor: inv.globalDiscountMinor ?? 0, withholdingOperationType: inv.withholdingOperationType };
-      const built = await buildDocument(companyId, 'invoice', input, { date: issueDate, session });
+      const input: DocInput = { customerId: inv.customerId, lines: linesToInput(inv.lines, false, 'keep'), ...discountsOf(inv), withholdingOperationType: inv.withholdingOperationType };
+      const built = await buildDocument(companyId, 'invoice', input, { date: issueDate, session, preserveQuantities: true });
       built.lines.forEach((l, i) => { l.deliveredQty = inv.lines[i]!.deliveredQty ?? 0; });
       // Brouillon antérieur aux adresses multiples : l'adresse de livraison qu'il portait est conservée
       const legacy = inv.deliveryAddress === undefined ? (inv.customerSnapshot as { shippingAddress?: unknown }).shippingAddress : undefined;

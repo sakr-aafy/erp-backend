@@ -10,10 +10,12 @@ import type { Column } from '../../services/export.service.js';
 import { deleteFile } from './customer.files.js';
 import { addressDto, addressesOf } from '../parties/delivery-address.js';
 import { normalizePhone, phoneDisplay, phoneInfo } from '../../utils/phone.js';
+import { claim, releaseAll, writeUnique } from './contact-keys.js';
+import { PaymentTerm } from '../../models/payment-term.model.js';
 
 type Id = Types.ObjectId;
 export type CustomerStatus = (typeof CUSTOMER_STATUSES)[number];
-export interface CustomerFilters { q?: string | undefined; status: 'open' | 'all' | CustomerStatus; type?: 'company' | 'walk_in' | undefined; city?: string | undefined; debtors?: boolean | undefined }
+export interface CustomerFilters { q?: string | undefined; status: 'open' | 'all' | CustomerStatus; type?: 'company' | 'walk_in' | undefined; city?: string | undefined; debtors?: boolean | undefined; customerId?: string | undefined }
 type Lean = CustomerDoc & { _id: Id; createdAt?: Date };
 export interface Actor { userId?: Id | undefined; name?: string | undefined }
 
@@ -60,6 +62,7 @@ export function buildFilter(companyId: Id, f: CustomerFilters): FilterQuery<Cust
   if (f.type) and.push(f.type === 'company' ? { $or: [{ type: 'company' }, { type: { $exists: false } }] } : { type: f.type });
   if (f.city) filter['address.city'] = new RegExp(`^${escapeRegex(f.city)}$`, 'i');
   if (f.debtors) filter.balanceMinor = { $gt: 0 };
+  if (f.customerId) filter._id = f.customerId as never;
   if (f.q) {
     const rx = new RegExp(escapeRegex(f.q), 'i');
     // Les numéros sont enregistrés sans espaces (+21623108065) : une saisie « 23 108 065 » doit les retrouver
@@ -121,9 +124,13 @@ export async function logAuto(companyId: Id, customerId: Id | string, kind: stri
 
 export async function create(companyId: Id, d: Input, actor: Actor = {}) {
   await ensureCounter(companyId, 'customer');
-  const customer = await withTransaction(async (session) => {
+  // Condition de paiement par défaut de la société, lorsqu'aucune n'est indiquée
+  const preset = d.paymentTerms === undefined ? await PaymentTerm.findOne({ companyId, isDefault: true, isActive: true }).lean() : null;
+  const data: Input = preset ? { ...d, paymentTerms: preset.label, paymentTermsCustom: preset.delayDays === null || preset.delayDays === undefined, ...(preset.delayDays != null && { paymentDelayDays: preset.delayDays }) } : d;
+  const customer = await writeUnique(companyId, async (session) => {
     const code = await nextDocumentNumber(companyId, 'customer', session);
-    const [c] = await Customer.create([{ ...dropNulls(prepare(d, d.address?.country, true)), companyId, code, status: 'active' }], { session });
+    const [c] = await Customer.create([{ ...dropNulls(prepare(data, data.address?.country, true)), companyId, code, status: 'active' }], { session });
+    await claim(companyId, c!._id, c!.toObject(), null, session);
     await logAuto(companyId, c!._id, 'customer_created', 'Client créé', actor, { code }, session);
     return c!;
   });
@@ -145,7 +152,12 @@ export async function update(companyId: Id, id: string, d: Input, actor: Actor =
   };
   flat(p);
   if (!Object.keys($set).length && !Object.keys($unset).length) return toDto(existing);
-  const c = await Customer.findOneAndUpdate({ _id: id, companyId }, { ...(Object.keys($set).length && { $set }), ...(Object.keys($unset).length && { $unset }) }, { returnDocument: 'after', runValidators: true }).lean();
+  const c = await writeUnique(companyId, async (session) => {
+    const before = await getOwn(companyId, id, session);
+    const after = await Customer.findOneAndUpdate({ _id: id, companyId }, { ...(Object.keys($set).length && { $set }), ...(Object.keys($unset).length && { $unset }) }, { returnDocument: 'after', runValidators: true, session }).lean();
+    await claim(companyId, existing._id, after!, before, session);
+    return after;
+  });
   await logAuto(companyId, id, 'customer_updated', 'Informations du client modifiées', actor, { fields: Object.keys(d) });
   return toDto(c as Lean);
 }
@@ -173,7 +185,7 @@ export async function remove(companyId: Id, id: string) {
   if ((c.balanceMinor ?? 0) !== 0) throw AppError.conflict('Suppression impossible : le solde du client n’est pas nul. Utilisez l’archivage.');
   await assertNotReferenced('customer', companyId, c._id);
   const docs = await CustomerDocument.find({ companyId, customerId: c._id }).select('fileId').lean();
-  await Customer.deleteOne({ _id: id, companyId });
+  await withTransaction(async (session) => { await Customer.deleteOne({ _id: id, companyId }, { session }); await releaseAll(companyId, c._id, session); });
   await Promise.all([CustomerActivity.deleteMany({ companyId, customerId: c._id }), CustomerDocument.deleteMany({ companyId, customerId: c._id }), ...docs.map((d) => deleteFile(d.fileId))]);
 }
 
@@ -196,45 +208,52 @@ export async function assertCanSell(companyId: Id, customerId: Id | string, newA
 // ---------- Contacts (un seul contact principal à tout instant) ----------
 type ContactInput = { name: string; role?: string | undefined; email?: string | undefined; phone?: string | undefined; isPrimary?: boolean | undefined };
 const withPrimary = (list: { isPrimary?: boolean | null | undefined }[], primaryIdx: number) => list.map((k, i) => ({ ...k, isPrimary: i === primaryIdx }));
-async function saveContacts(companyId: Id, id: string, contacts: unknown[]) {
-  const c = await Customer.findOneAndUpdate({ _id: id, companyId }, { $set: { contacts } }, { returnDocument: 'after', runValidators: true }).lean();
-  return toDto(c as Lean);
-}
-async function editableOwn(companyId: Id, id: string) {
-  const c = await getOwn(companyId, id);
-  if (effectiveStatus(c) === 'archived') throw AppError.conflict('Client archivé : réactivez-le avant de le modifier');
-  return c;
+type Stored = { _id?: Id; isPrimary?: boolean | null; name?: string };
+/** Modification des contacts : lecture, contrôle d'unicité et écriture dans la même transaction. */
+async function mutateContacts(companyId: Id, id: string, change: (list: Stored[], customer: Lean) => Stored[]) {
+  const updated = await writeUnique(companyId, async (session) => {
+    const c = await getOwn(companyId, id, session);
+    if (effectiveStatus(c) === 'archived') throw AppError.conflict('Client archivé : réactivez-le avant de le modifier');
+    const contacts = change([...((c.contacts ?? []) as unknown as Stored[])], c);
+    const after = await Customer.findOneAndUpdate({ _id: id, companyId }, { $set: { contacts } }, { returnDocument: 'after', runValidators: true, session }).lean();
+    await claim(companyId, c._id, after!, c, session);
+    return after;
+  });
+  return toDto(updated as Lean);
 }
 export async function addContact(companyId: Id, id: string, k: ContactInput, actor: Actor = {}) {
-  const c = await editableOwn(companyId, id); const list = [...(c.contacts ?? [])] as { isPrimary?: boolean | null | undefined }[];
-  if (list.length >= 20) throw AppError.conflict('20 contacts maximum par client');
-  list.push({ ...withPhone(k, c.address?.country), isPrimary: !!k.isPrimary || list.length === 0 } as never);
-  const primary = k.isPrimary || list.length === 1 ? list.length - 1 : list.findIndex((x) => x.isPrimary);
-  const out = await saveContacts(companyId, id, withPrimary(list, primary));
+  const out = await mutateContacts(companyId, id, (list, c) => {
+    if (list.length >= 20) throw AppError.conflict('20 contacts maximum par client');
+    list.push({ ...withPhone(k, c.address?.country), isPrimary: !!k.isPrimary || list.length === 0 } as Stored);
+    return withPrimary(list, k.isPrimary || list.length === 1 ? list.length - 1 : list.findIndex((x) => x.isPrimary));
+  });
   await logAuto(companyId, id, 'customer_updated', `Contact ajouté : ${k.name}`, actor, { contact: k.name });
   return out;
 }
 export async function updateContact(companyId: Id, id: string, contactId: string, k: Partial<ContactInput>, actor: Actor = {}) {
-  const c = await editableOwn(companyId, id); const list = (c.contacts ?? []) as ({ _id?: Id; isPrimary?: boolean | null })[];
-  const i = list.findIndex((x) => String(x._id) === contactId); if (i < 0) throw AppError.notFound('Contact introuvable');
-  const merged = { ...(list[i] as object), ...withPhone(k, c.address?.country) } as { isPrimary?: boolean };
-  const next = [...list]; next[i] = merged as never;
-  // Un seul contact principal : en retirer le statut à l'actuel désigne le premier autre contact (ou lui-même s'il est seul)
-  const other = list.findIndex((_, j) => j !== i);
-  const primary = k.isPrimary === true ? i : k.isPrimary === false && list[i]!.isPrimary ? (other >= 0 ? other : i) : list.findIndex((x) => x.isPrimary);
-  const out = await saveContacts(companyId, id, withPrimary(next, primary));
-  await logAuto(companyId, id, 'customer_updated', `Contact modifié : ${(merged as { name?: string }).name ?? ''}`, actor);
+  let name = '';
+  const out = await mutateContacts(companyId, id, (list, c) => {
+    const i = list.findIndex((x) => String(x._id) === contactId); if (i < 0) throw AppError.notFound('Contact introuvable');
+    const merged = { ...(list[i] as object), ...withPhone(k, c.address?.country) } as Stored; name = merged.name ?? '';
+    const next = [...list]; next[i] = merged;
+    // Un seul contact principal : en retirer le statut à l'actuel désigne le premier autre contact (ou lui-même s'il est seul)
+    const other = list.findIndex((_, j) => j !== i);
+    return withPrimary(next, k.isPrimary === true ? i : k.isPrimary === false && list[i]!.isPrimary ? (other >= 0 ? other : i) : list.findIndex((x) => x.isPrimary));
+  });
+  await logAuto(companyId, id, 'customer_updated', `Contact modifié : ${name}`, actor);
   return out;
 }
 export async function setPrimaryContact(companyId: Id, id: string, contactId: string, actor: Actor = {}) {
   return updateContact(companyId, id, contactId, { isPrimary: true }, actor);
 }
 export async function removeContact(companyId: Id, id: string, contactId: string, actor: Actor = {}) {
-  const c = await editableOwn(companyId, id); const list = (c.contacts ?? []) as ({ _id?: Id; isPrimary?: boolean | null; name?: string })[];
-  const i = list.findIndex((x) => String(x._id) === contactId); if (i < 0) throw AppError.notFound('Contact introuvable');
-  const wasPrimary = !!list[i]!.isPrimary; const next = list.filter((_, j) => j !== i);
-  const out = await saveContacts(companyId, id, next.length ? withPrimary(next, wasPrimary ? 0 : next.findIndex((x) => x.isPrimary)) : []);
-  await logAuto(companyId, id, 'customer_updated', `Contact supprimé : ${list[i]!.name ?? ''}`, actor);
+  let name = '';
+  const out = await mutateContacts(companyId, id, (list) => {
+    const i = list.findIndex((x) => String(x._id) === contactId); if (i < 0) throw AppError.notFound('Contact introuvable');
+    const wasPrimary = !!list[i]!.isPrimary; name = list[i]!.name ?? ''; const next = list.filter((_, j) => j !== i);
+    return next.length ? withPrimary(next, wasPrimary ? 0 : next.findIndex((x) => x.isPrimary)) : [];
+  });
+  await logAuto(companyId, id, 'customer_updated', `Contact supprimé : ${name}`, actor);
   return out;
 }
 

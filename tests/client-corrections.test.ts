@@ -6,7 +6,7 @@ import mongoose from 'mongoose';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { app, authed, binaryParser, pdfText, setupDb, teardownDb } from './helpers.js';
-import { line, logisticsCompany, plusDays, quoteBody, stockIn, today, type LCtx } from './sales.helpers.js';
+import { line, logisticsCompany, plusDays, quoteBody, stockIn, today, type LCtx, acceptQuote } from './sales.helpers.js';
 import { Customer } from '../src/models/customer.model.js';
 import { Supplier } from '../src/models/supplier.model.js';
 import { AuditLog } from '../src/models/audit-log.model.js';
@@ -41,18 +41,20 @@ describe('téléphones : format international, liens, numéros non reconnus', ()
     expect((await col('customers').findOne({ _id: oid(c.id) }))!.secondaryPhone).toBe('+21623108065');
   });
   it('indicatif jamais ajouté deux fois ; sans pays → Tunisie', async () => {
-    for (const phone of ['+216 23 108 065', '00216 23108065', '216 23 108 065', '+21623108065', '23.108.065']) {
-      expect((await mkCustomer({ name: `Préfixe ${phone}`, phone })).phone, phone).toBe('+21623108065');
+    // Une seule fiche (un numéro n'appartient qu'à un client) : toutes les écritures donnent la même valeur enregistrée
+    const c = await mkCustomer({ name: 'Préfixes', phone: '23 555 065' });
+    for (const phone of ['+216 23 555 065', '00216 23555065', '216 23 555 065', '+21623555065', '23.555.065']) {
+      const r = await A.j.put(`/customers/${c.id}`, { phone }); expect(r.status, phone).toBe(200); expect(r.body.phone, phone).toBe('+21623555065');
     }
   });
   it('international : pays du client respecté ; un numéro étranger ne devient jamais tunisien', async () => {
     const fr = await mkCustomer({ name: 'Client FR', address: { country: 'France' }, phone: '06 12 34 56 78', secondaryPhone: '23108065' });
     expect(fr.phone).toBe('+33612345678'); expect(fr.phoneInfo.display).toBe('+33 6 12 34 56 78');
     expect(fr.secondaryPhone).toBe('23108065'); expect(fr.secondaryPhoneInfo).toMatchObject({ valid: false, display: '23108065' });
-    expect((await mkCustomer({ name: 'FR chez TN', phone: '+33 6 12 34 56 78' })).phone).toBe('+33612345678');
+    expect((await mkCustomer({ name: 'FR chez TN', phone: '+33 6 11 22 33 44' })).phone).toBe('+33611223344');
     expect((await mkCustomer({ name: 'DE', address: { country: 'Allemagne' }, phone: '030 901820' })).phone).toBe('+4930901820');
-    const unknown = await mkCustomer({ name: 'Pays inconnu', address: { country: 'Pays imaginaire' }, phone: '23108065' });
-    expect(unknown.phone).toBe('23108065'); expect(unknown.phoneInfo.valid).toBe(false);
+    const unknown = await mkCustomer({ name: 'Pays inconnu', address: { country: 'Pays imaginaire' }, phone: '24681357' });
+    expect(unknown.phone).toBe('24681357'); expect(unknown.phoneInfo.valid).toBe(false);
   });
   it('un numéro non reconnu est conservé tel quel et signalé', async () => {
     const c = await mkCustomer({ name: 'Non reconnu', phone: '72 679 670 / 23 108 065' });
@@ -71,11 +73,11 @@ describe('téléphones : format international, liens, numéros non reconnus', ()
     }
   });
   it('export et fiche PDF affichent le format lisible', async () => {
-    const c = await mkCustomer({ name: 'PDF Tel', phone: '23108065', contacts: [{ name: 'Ali', phone: '98123456', isPrimary: true }] });
+    const c = await mkCustomer({ name: 'PDF Tel', phone: '23999065', contacts: [{ name: 'Ali', phone: '98999456', isPrimary: true }] });
     const csv = await A.j.get('/customers/export?format=csv&q=PDF%20Tel');
-    expect(csv.text).toContain('+216 23 108 065');
+    expect(csv.text).toContain('+216 23 999 065');
     const text = await pdfOf(`/customers/${c.id}/pdf`);
-    expect(text).toContain('+216 23 108 065'); expect(text).toContain('+216 98 123 456');
+    expect(text).toContain('+216 23 999 065'); expect(text).toContain('+216 98 999 456');
   });
 });
 
@@ -192,7 +194,7 @@ describe('adresses de livraison multiples — clients', () => {
     expect(kept.body.deliveryAddress.label).toBe('Dépôt Tunis');
     const qText = await pdfOf(`/quotations/${q.id}/pdf`);
     expect(qText).toContain('LIVRAISON'); expect(qText).toContain('Ariana'); expect(qText).toContain('+216 98 123 456');
-    const pro = (await A.j.post(`/quotations/${q.id}/convert-proforma`)).body;
+    await acceptQuote(A.j, q.id); const pro = (await A.j.post(`/quotations/${q.id}/convert-proforma`)).body;
     expect((await A.j.get(`/proformas/${pro.proformaId}`)).body.deliveryAddress.label).toBe('Dépôt Tunis');
     const inv = (await A.j.post(`/proformas/${pro.proformaId}/convert-invoice`)).body;
     const draft = (await A.j.get(`/invoices/${inv.invoiceId}`)).body; expect(draft.deliveryAddress.label).toBe('Dépôt Tunis');
@@ -213,8 +215,9 @@ describe('adresses de livraison multiples — clients', () => {
     const ctx = { ...A, customerId: c };
     await stockIn(A, A.products.a19, 20, 50_000);
     const q = (await A.j.post('/quotations', quoteBody(ctx, [line(A.products.a19, 3)], { deliveryAddressId: depot, paymentTerms: 'Paiement selon contrat' }))).body;
-    await A.j.post(`/quotations/${q.id}/accept`);
-    const src = { source: { type: 'quotation', id: q.id }, lines: [{ sourceLineId: q.lines[0].id, quantity: 1 }] };
+    await acceptQuote(A.j, q.id);
+    const conv = (await A.j.post(`/quotations/${q.id}/convert-proforma`)).body; const p = (await A.j.get(`/proformas/${conv.proformaId}`)).body;
+    const src = { source: { type: 'proforma', id: p.id }, lines: [{ sourceLineId: p.lines[0].id, quantity: 1 }] };
     const bl = (await A.j.post('/delivery-notes', src)).body; expect(bl.deliveryAddress.addressId).toBe(depot);
     const other = (await A.j.post('/delivery-notes', { ...src, deliveryAddressId: usine })).body; expect(other.deliveryAddress.label).toBe('Usine principale');
     expect((await A.j.post(`/delivery-notes/${bl.id}/validate`, { warehouseId: A.w1 })).status).toBe(200);
@@ -321,7 +324,7 @@ describe('conditions de paiement libres', () => {
     // modification sans préciser les conditions : conservées
     expect((await A.j.put(`/quotations/${own.id}`, quoteBody(ctx, [line(A.products.a19, 2)]))).body.paymentTerms).toBe('50 % à la commande et 50 % à la livraison');
     expect((await A.j.post(`/quotations/${own.id}/duplicate`)).body.paymentTerms).toBe('50 % à la commande et 50 % à la livraison');
-    const pro = (await A.j.post(`/quotations/${own.id}/convert-proforma`)).body;
+    await acceptQuote(A.j, own.id); const pro = (await A.j.post(`/quotations/${own.id}/convert-proforma`)).body;
     expect((await A.j.get(`/proformas/${pro.proformaId}`)).body.paymentTerms).toBe('50 % à la commande et 50 % à la livraison');
     expect(await pdfOf(`/proformas/${pro.proformaId}/pdf`)).toContain('Conditions de paiement : 50 %');
   });

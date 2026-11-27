@@ -20,12 +20,14 @@ beforeAll(async () => {
 afterAll(async () => { clearReferenceChecks(); await teardownDb(); });
 
 describe('catalogue : catégories et unités', () => {
-  it('unités : CRUD, code unique, suppression refusée si utilisée', async () => {
-    const u = await post(A.token, '/product-units', { code: 'pce', name: 'Pièce' }); expect(u.status).toBe(201); unitId = u.body.id;
-    expect((await post(A.token, '/product-units', { code: 'pce', name: 'Autre' })).status).toBe(409);
-    expect((await post(B.token, '/product-units', { code: 'pce', name: 'Pièce B' })).status).toBe(201);
-    expect((await api().put(`/api/v1/product-units/${unitId}`).set(authed(A.token)).send({ name: 'Pièces' })).body.name).toBe('Pièces');
-    expect((await get(A.token, '/product-units')).body).toHaveLength(1);
+  it('unités : trois unités fixes, création et modification refusées, suppression protégée', async () => {
+    const list = (await get(A.token, '/product-units')).body as { id: string; code: string; name: string; fixedKey: string; decimals: number }[];
+    expect(list.map((u) => [u.code, u.name, u.decimals])).toEqual([['PC', 'Pièce', 0], ['M', 'Mètre', 1], ['KG', 'Kilogramme', 1]]);
+    unitId = list[0]!.id;
+    expect((await post(A.token, '/product-units', { code: 'H', name: 'Heure' })).body.error.code).toBe('UNITS_FIXED');
+    expect((await api().put(`/api/v1/product-units/${unitId}`).set(authed(A.token)).send({ name: 'Pièces' })).status).toBe(409);
+    expect((await api().delete(`/api/v1/product-units/${unitId}`).set(authed(A.token))).status).toBe(409);
+    expect((await get(B.token, '/product-units')).body).toHaveLength(3);
   });
   it('catégories : famille → sous-famille (2 niveaux max), doublons, suppression protégée', async () => {
     const f = await post(A.token, '/product-categories', { name: 'Machines' }); famId = f.body.id;
@@ -48,7 +50,7 @@ describe('articles : règles de gestion', () => {
   it('crée un article ; référence unique (insensible à la casse), propre à la société', async () => {
     const r = await mk(A.token, { ...base(), categoryId: subId, mainSupplierId: supId, minStock: 5 });
     expect(r.status).toBe(201);
-    expect(r.body).toMatchObject({ reference: 'REF-001', categoryName: 'Tours', unitCode: 'pce', marginMinor: 5000, belowCost: false, mainSupplierName: 'Fournisseur P', minStock: 5, isActive: true });
+    expect(r.body).toMatchObject({ reference: 'REF-001', categoryName: 'Tours', unitCode: 'PC', marginMinor: 5000, belowCost: false, mainSupplierName: 'Fournisseur P', minStock: 5, isActive: true });
     expect(r.body.marginRatePct).toBe(50); expect(r.body.markPct).toBe(33.33); expect(r.body.warnings).toEqual([]);
     const dup = await mk(A.token, { ...base(), reference: 'ref-001' });
     expect(dup.status).toBe(409); expect(dup.body.error.message).toMatch(/référence/i);
@@ -160,7 +162,7 @@ describe('articles : import / export Excel et CSV', () => {
     const f = await xlsx([H,
       ['OK-1', 'Valide', '', '', '', 'pce', 1, 2, 'T1', '', '', ''],
       ['', 'Sans référence', '', '', '', 'pce', 1, 2, 'T1', '', '', ''],
-      ['BAD-U', 'Unité inconnue', '', '', '', 'kg', 1, 2, 'T1', '', '', ''],
+      ['BAD-U', 'Unité inconnue', '', '', '', 'litre', 1, 2, 'T1', '', '', ''],
       ['BAD-V', 'TVA inconnue', '', '', '', 'pce', 1, 2, 'T9', '', '', ''],
       ['BAD-P', 'Prix négatif', '', '', '', 'pce', -3, 'abc', 'T1', '', '', ''],
       ['BAD-C', 'Famille inconnue', '', 'Inconnue', '', 'pce', 1, 2, 'T1', '', '', ''],

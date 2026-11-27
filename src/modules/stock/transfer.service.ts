@@ -8,6 +8,7 @@ import { withTransaction } from '../../utils/transaction.js';
 import { emitDomainEvent } from '../../services/domain-events.js';
 import { ensureCounter, nextDocumentNumber } from '../../services/numbering.service.js';
 import { ensureLevels } from '../../services/stock.service.js';
+import { assertQuantities } from '../products/units.js';
 
 type Id = Types.ObjectId; type Lean = TransferDoc & { _id: Id; createdAt?: Date };
 export const transferBody = z.object({
@@ -23,6 +24,7 @@ async function checkBody(companyId: Id, b: Body) {
   const whs = await Warehouse.find({ companyId, _id: { $in: [b.fromWarehouseId, b.toWarehouseId] }, isActive: true }).lean();
   if (whs.length !== 2) throw AppError.badRequest('Magasin invalide ou inactif');
   const products = await Product.find({ companyId, _id: { $in: b.lines.map((l) => l.productId) } }).lean(); const byId = new Map(products.map((p) => [p._id.toString(), p]));
+  await assertQuantities(companyId, b.lines.map((l) => ({ productId: l.productId, quantity: l.quantity })));
   return b.lines.map((l) => { const p = byId.get(l.productId); if (!p) throw AppError.badRequest('Article introuvable'); if (p.kind === 'service') throw AppError.badRequest(`« ${p.reference} » est un service : non transférable`); return { productId: p._id, designation: `${p.reference} — ${p.name}`, quantity: l.quantity, serials: l.serials ?? [] }; });
 }
 export async function list(companyId: Id, f: { status?: string | undefined; page: number; limit: number }) {

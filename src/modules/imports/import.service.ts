@@ -19,6 +19,7 @@ import { Supplier } from '../../models/supplier.model.js';
 import { minorInt } from '../parties/party.shared.js';
 import { rangeFilter } from '../sales/document.http.js';
 import { computeImport, toBaseMinor } from './import.calc.js';
+import { assertQuantities, carriedOver } from '../products/units.js';
 
 type Id = Types.ObjectId; type Lean = ImportFileDoc & { _id: Id; createdAt?: Date };
 const FLOW = ['draft', 'ordered', 'shipped', 'customs', 'arrived'] as const;
@@ -78,7 +79,8 @@ export async function list(companyId: Id, f: { q?: string | undefined; status?: 
 export async function getOwn(companyId: Id, id: string, session?: ClientSession) { const f = await ImportFile.findOne({ _id: id, companyId }).session(session ?? null); if (!f) throw AppError.notFound('Dossier d’importation introuvable'); return f; }
 export const get = async (c: Id, id: string) => toDto((await getOwn(c, id)).toObject() as Lean);
 
-async function buildLines(companyId: Id, lines: z.infer<typeof lineBody>[]) {
+async function buildLines(companyId: Id, lines: z.infer<typeof lineBody>[], current: Lean['lines'] = [] as unknown as Lean['lines']) {
+  await assertQuantities(companyId, lines.map((l) => ({ productId: l.productId, quantity: l.quantity, exempt: current.some((c) => String(c.productId) === l.productId && carriedOver(l.quantity, c.quantity)) })));
   const ps = await Product.find({ companyId, _id: { $in: lines.map((l) => l.productId) } }).lean(); const by = new Map(ps.map((p) => [p._id.toString(), p]));
   return lines.map((l) => { const p = by.get(l.productId); if (!p) throw AppError.badRequest('Article introuvable'); if (p.kind === 'service') throw AppError.badRequest(`« ${p.reference} » est un service : non importable en stock`);
     const st = p.status ?? (p.isActive === false ? 'inactive' : 'active'); if (st !== 'active') throw new AppError(409, `« ${p.reference} » est ${({ inactive: 'inactif', blocked: 'bloqué', archived: 'archivé' } as Record<string, string>)[st] ?? st} : achat à l'importation impossible`, `PRODUCT_${st.toUpperCase()}`);
@@ -107,7 +109,7 @@ export async function update(companyId: Id, id: string, b: z.infer<typeof create
   if (String(f.supplierId) !== String(sup._id)) assertSupplierActive(sup);
   const date = startOfDay(b.orderDate ?? f.orderDate); await decimalsOf(companyId, b.currency);
   const rate = b.exchangeRate ? { rate: b.exchangeRate, rateDate: date } : await resolveRate(companyId, b.currency, date);
-  f.set({ supplierId: sup._id, supplier: { name: sup.name, taxId: sup.taxId }, currency: b.currency, exchangeRate: rate.rate, exchangeRateDate: rate.rateDate, orderDate: date, reference: b.reference, lines: await buildLines(companyId, b.lines), notes: b.notes });
+  f.set({ supplierId: sup._id, supplier: { name: sup.name, taxId: sup.taxId }, currency: b.currency, exchangeRate: rate.rate, exchangeRateDate: rate.rateDate, orderDate: date, reference: b.reference, lines: await buildLines(companyId, b.lines, f.lines), notes: b.notes });
   // les frais déjà saisis dans une autre devise gardent leur propre taux ; ceux dans la devise du dossier suivent son taux
   await recompute(f as never); await f.save(); return toDto(f.toObject() as Lean);
 }

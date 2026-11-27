@@ -13,12 +13,23 @@ export async function salesCompany(name: string, email: string) {
   const c = await companyWithAdmin(name, email);
   await seedVat(c.companyId, [{ code: 'T19', ratePct: 19 }, { code: 'T13', ratePct: 13 }, { code: 'T7', ratePct: 7 }, { code: 'T0', regime: 'zero' }, { code: 'EXO', regime: 'exempt' }]);
   const j = J(c.token);
-  const unitId = (await j.post('/product-units', { code: 'PCE', name: 'Pièce' })).body.id as string;
+  const units = (await j.get('/product-units')).body as { id: string; fixedKey: string }[]; // unités fixes de la société
+  const unitId = units.find((u) => u.fixedKey === 'piece')!.id;
   const mk = async (reference: string, vatRateCode: string, salePriceMinor: number, kind = 'product') => (await j.post('/products', { reference, name: `Article ${reference}`, unitId, vatRateCode, purchasePriceMinor: 1000, salePriceMinor, kind })).body.id as string;
   const products = { a19: await mk('A19', 'T19', 100_000), b13: await mk('B13', 'T13', 50_000), c7: await mk('C7', 'T7', 20_000), svc: await mk('SRV', 'T19', 80_000, 'service') };
   // Non assujetti : les scénarios fiscaux activent explicitement la retenue (le défaut d’un nouveau client est « assujetti »)
   const customerId = (await j.post('/customers', { name: 'Client Test', taxId: 'CT-1', email: 'client@test.tn', paymentDelayDays: 30, subjectToWithholding: false })).body.id as string;
   return { ...c, j, unitId, products, customerId };
+}
+type Client = ReturnType<typeof J>;
+/** Un devis ne s'accepte ou ne se refuse qu'une fois envoyé : marquage manuel puis décision. */
+export const sendQuote = (j: Client, id: string) => j.post(`/quotations/${id}/mark-sent`, { method: 'hand' });
+export const acceptQuote = async (j: Client, id: string) => { await sendQuote(j, id); return j.post(`/quotations/${id}/accept`); };
+export const refuseQuote = async (j: Client, id: string) => { await sendQuote(j, id); return j.post(`/quotations/${id}/refuse`); };
+/** Articles vendus au mètre (une décimale) : scénarios de quantités fractionnaires. */
+export async function sellByMeter(ctx: Ctx, ...ids: string[]) {
+  const meter = ((await ctx.j.get('/product-units')).body as { id: string; fixedKey: string }[]).find((u) => u.fixedKey === 'meter')!.id;
+  for (const id of ids) await ctx.j.put(`/products/${id}`, { unitId: meter });
 }
 export const line = (productId: string, quantity = 1, extra: object = {}) => ({ productId, quantity, ...extra });
 export const quoteBody = (ctx: Ctx, lines: object[], extra: object = {}) => ({ customerId: ctx.customerId, validUntil: plusDays(30), lines, ...extra });

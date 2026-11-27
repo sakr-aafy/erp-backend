@@ -4,6 +4,7 @@ import { DeliveryNote, Invoice, Proforma, Quotation } from '../../models/sales.m
 import { escapeRegex } from '../../utils/pagination.js';
 import { getOwn } from './product.service.js';
 import { expireOverdue as expireQuotations } from '../quotations/quotation.service.js';
+import { QUOTATION_STATUSES, QUOTATION_STATUS_LABEL, statusOf, storedStatuses, type QuotationStatus } from '../quotations/quotation.workflow.js';
 
 type Id = Types.ObjectId;
 type Perms = ReadonlySet<string>;
@@ -16,7 +17,7 @@ export const KINDS: Record<Kind, KindDef> = {
   purchase_order: { group: 'purchases', label: 'Commande fournisseur', permission: 'purchases:view', statuses: ['draft', 'confirmed', 'partially_received', 'received', 'cancelled'], webPath: '/purchase-orders' },
   goods_receipt: { group: 'purchases', label: 'Bon de réception', permission: 'purchases:view', statuses: ['draft', 'validated'], webPath: '/goods-receipts' },
   purchase_invoice: { group: 'purchases', label: 'Facture d’achat', permission: 'purchases:view', statuses: ['draft', 'validated'], webPath: '/purchase-invoices' },
-  quotation: { group: 'sales', label: 'Devis', permission: 'quotations:view', statuses: ['pending', 'sent', 'accepted', 'refused', 'expired'], webPath: '/quotations', pdfPath: '/quotations' },
+  quotation: { group: 'sales', label: 'Devis', permission: 'quotations:view', statuses: [...QUOTATION_STATUSES], webPath: '/quotations', pdfPath: '/quotations' },
   proforma: { group: 'sales', label: 'Facture proforma', permission: 'proformas:view', statuses: ['pending', 'converted', 'expired', 'cancelled'], webPath: '/proformas', pdfPath: '/proformas' },
   invoice: { group: 'sales', label: 'Facture de vente', permission: 'invoices:view', statuses: ['draft', 'validated'], webPath: '/invoices', pdfPath: '/invoices' },
   credit_note: { group: 'sales', label: 'Avoir', permission: 'invoices:view', statuses: ['draft', 'validated'], webPath: '/invoices', pdfPath: '/invoices' },
@@ -63,11 +64,11 @@ export async function transactions(companyId: Id, productId: string, perms: Perm
       const ls = d.lines.filter((l) => String(l.productId) === String(pid)); const qty = sum(ls, 'quantity');
       const total = ls.reduce((t, l) => t + (l.netHtMinor ?? l.valueMinor ?? l.landedTotalMinor ?? 0), 0);
       return { key: `${kind}:${d._id}`, group: def.group, kind, kindLabel: def.label, number: d.number ?? null, date: d[dateKey] as Date, customer: d.customerSnapshot?.name ?? null, supplier: d.supplier?.name ?? null, quantity: qty,
-        unitPriceMinor: qty > 0 ? Math.round(total / qty) : (ls[0]?.unitPriceMinor ?? null), currency: baseCurrency, totalMinor: total, status: d.status, statusLabel: STATUS_LABEL[d.status] ?? d.status, phase: phaseOf(d.status),
+        unitPriceMinor: qty > 0 ? Math.round(total / qty) : (ls[0]?.unitPriceMinor ?? null), currency: baseCurrency, totalMinor: total, status: kind === 'quotation' ? statusOf(d.status) : d.status, statusLabel: kind === 'quotation' ? QUOTATION_STATUS_LABEL[statusOf(d.status)] : STATUS_LABEL[d.status] ?? d.status, phase: phaseOf(d.status),
         warehouse: d.warehouseId ? whs.get(String(d.warehouseId)) ?? null : null, extra: null, webPath: `${def.webPath}/${d._id}`, pdfPath: def.pdfPath ? `${def.pdfPath}/${d._id}/pdf` : null, direction: null, ...over };
     };
     const docs = async (M: any, dateKey: string, extra: Record<string, unknown> = {}, overFn?: (d: Doc) => Partial<TxRow>) => {
-      const f: Record<string, unknown> = { ...base, ...extra, ...(q.status && { status: q.status }), ...(rx && { number: rx }), ...(range(q.from, q.to) && { [dateKey]: range(q.from, q.to) }), ...(q.warehouseId && ['goods_receipt', 'delivery_note'].includes(kind) && { warehouseId: q.warehouseId }) };
+      const f: Record<string, unknown> = { ...base, ...extra, ...(q.status && { status: kind === 'quotation' ? { $in: storedStatuses(q.status as QuotationStatus) } : q.status }), ...(rx && { number: rx }), ...(range(q.from, q.to) && { [dateKey]: range(q.from, q.to) }), ...(q.warehouseId && ['goods_receipt', 'delivery_note'].includes(kind) && { warehouseId: q.warehouseId }) };
       const [items, total] = await Promise.all([M.find(f).sort({ [dateKey]: -1, _id: -1 }).limit(take).lean() as Promise<Doc[]>, M.countDocuments(f)]);
       return { rows: items.map((d) => mk(d, dateKey, overFn?.(d) ?? {})), total };
     };

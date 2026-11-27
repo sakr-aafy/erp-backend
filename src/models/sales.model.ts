@@ -34,13 +34,19 @@ export const totalsSchema = new Schema(
   },
   { _id: false },
 );
-const customerSnapshot = new Schema({ name: String, code: String, taxId: String, address: addressSchema, shippingAddress: addressSchema }, { _id: false });
+const customerSnapshot = new Schema({ name: String, code: String, taxId: String, email: String, phone: String, address: addressSchema, shippingAddress: addressSchema }, { _id: false });
 const withholdingSchema = new Schema({ ruleId: oid('FiscalRule'), code: String, ratePct: Number, base: String, amountMinor: Number }, { _id: false });
 const stampSchema = new Schema({ ruleId: oid('FiscalRule'), code: String, amountMinor: Number }, { _id: false });
 
 const commonDoc = {
   companyId: oid('Company', true), customerId: oid('Customer', true), customerSnapshot: { type: customerSnapshot, required: true },
-  lines: { type: [lineSchema], default: [] }, globalDiscountPct: { type: Number, default: 0 }, globalDiscountMinor: { type: Number, default: 0 },
+  lines: { type: [lineSchema], default: [] },
+  /** ANCIENNE remise globale en % appliquée au total (documents antérieurs uniquement). */
+  globalDiscountPct: { type: Number, default: 0 },
+  /** Remise globale en % recopiée sur toutes les lignes (déjà comprise dans leurs nets). */
+  syncDiscountPct: { type: Number, default: 0 },
+  /** Remise supplémentaire en montant, répartie après les remises de ligne. */
+  globalDiscountMinor: { type: Number, default: 0 },
   withholdingOperationType: String, withholding: withholdingSchema, stamp: stampSchema, totals: { type: totalsSchema, required: true },
   notes: { type: String, trim: true }, createdBy: oid('User'), sentAt: Date,
   /** Copie de l'adresse de livraison choisie (null : aucune ; absent : document antérieur, voir customerSnapshot.shippingAddress). */
@@ -52,7 +58,17 @@ const paymentTermsFields = { paymentTerms: { type: String, trim: true }, payment
 // ---- Devis ----
 const quotationSchema = new Schema({
   ...commonDoc, ...paymentTermsFields, number: { type: String, required: true }, issueDate: { type: Date, required: true }, validUntil: { type: Date, required: true },
-  status: { type: String, enum: ['pending', 'sent', 'accepted', 'refused', 'expired'], default: 'pending' }, acceptedAt: Date, refusedAt: Date, expiredAt: Date,
+  /** « pending » : ancienne valeur de « draft », lue comme brouillon jusqu'à la migration. */
+  status: { type: String, enum: ['draft', 'sent', 'accepted', 'refused', 'expired', 'cancelled', 'pending'], default: 'draft' }, acceptedAt: Date, refusedAt: Date, expiredAt: Date, cancelledAt: Date, cancelReason: String,
+  /** Version courante (le numéro de devis ne change pas d'une version à l'autre). */
+  version: { type: Number, default: 1 }, versionCreatedAt: Date, versionCreatedByName: String,
+  /** Version acceptée par le client : c'est elle qui est convertie en proforma. */
+  acceptedVersion: Number,
+  /** Compteur de modifications (refus des écritures concurrentes). */
+  revision: { type: Number, default: 0 },
+  /** Envoi en cours : le contenu ne peut pas changer entre la génération du PDF et l'enregistrement de la version envoyée. */
+  sendingUntil: Date,
+  deliveryTime: { type: String, trim: true },
   /** Transmission au client (e-mail depuis l'ERP ou marquage manuel). `sentAt` : dernier envoi. */
   sentBy: oid('User'), sentByName: String, sentTo: String, sentMethod: { type: String, enum: ['email', 'hand', 'post', 'whatsapp', 'phone', 'other'] },
   acceptedBy: oid('User'), acceptedByName: String, acceptanceNote: String, refusedBy: oid('User'), refusedByName: String, refusalReason: String,
@@ -71,7 +87,8 @@ export const Quotation = model('Quotation', quotationSchema);
 // ---- Chronologie métier d'un devis (distincte du journal d'audit de sécurité) : événements IMMUABLES ----
 export const QUOTATION_EVENTS = ['created', 'line_added', 'line_removed', 'price_changed', 'discount_changed', 'quantity_changed', 'designation_changed', 'vat_changed', 'lines_reordered',
   'customer_changed', 'payment_terms_changed', 'validity_changed', 'date_changed', 'delivery_address_changed', 'global_discount_changed', 'notes_changed',
-  'marked_sent', 'email_sent', 'accepted', 'refused', 'expired', 'duplicated', 'converted_proforma', 'converted_invoice', 'invoice_unlinked'] as const;
+  'marked_sent', 'email_sent', 'accepted', 'refused', 'expired', 'duplicated', 'converted_proforma', 'converted_invoice', 'invoice_unlinked',
+  'delivery_time_changed', 'version_created', 'version_abandoned', 'cancelled', 'document_added', 'document_updated', 'document_removed', 'comment_added', 'comment_edited', 'comment_archived', 'migrated'] as const;
 const quotationActivitySchema = new Schema({
   companyId: oid('Company', true), quotationId: oid('Quotation', true), kind: { type: String, enum: QUOTATION_EVENTS, required: true },
   occurredAt: { type: Date, required: true }, userId: oid('User'), userName: String,
@@ -91,11 +108,62 @@ quotationActivitySchema.pre(['updateOne', 'updateMany', 'findOneAndUpdate', 'rep
 export type QuotationActivityDoc = InferSchemaType<typeof quotationActivitySchema>;
 export const QuotationActivity = model('QuotationActivity', quotationActivitySchema);
 
+// ---- Versions d'un devis : copies FIGÉES (le contenu ne se modifie ni ne se supprime) ----
+export const VERSION_STATUSES = ['sent', 'accepted', 'refused', 'expired', 'cancelled', 'superseded', 'abandoned', 'draft'] as const;
+const quotationVersionSchema = new Schema({
+  companyId: oid('Company', true), quotationId: oid('Quotation', true), version: { type: Number, required: true },
+  /** Seul élément qui évolue (envoyée → acceptée, refusée, expirée, remplacée…). */
+  status: { type: String, enum: VERSION_STATUSES, required: true },
+  /** Copie complète du devis au moment du gel : client, adresses, dates, conditions, lignes, TVA, remises, totaux, devise. */
+  snapshot: { type: Schema.Types.Mixed, required: true },
+  versionCreatedAt: Date, authorName: String, frozenAt: { type: Date, required: true },
+  sentAt: Date, sentByName: String, sentTo: String, sentMethod: String,
+  /** « migration » : copie de référence de l'état disponible à la date de migration — ce n'est pas un historique. */
+  origin: { type: String, enum: ['application', 'migration'], default: 'application' },
+  /** PDF généré au moment du gel (identique à celui transmis). */
+  pdfFileId: Schema.Types.ObjectId,
+}, { timestamps: true, minimize: false });
+quotationVersionSchema.index({ companyId: 1, quotationId: 1, version: 1 }, { unique: true });
+const VERSION_MUTABLE = new Set(['status', 'sentAt', 'sentByName', 'sentTo', 'sentMethod', 'updatedAt']);
+quotationVersionSchema.pre(['updateOne', 'updateMany', 'findOneAndUpdate'], function () {
+  const u = (this.getUpdate() ?? {}) as Record<string, unknown>;
+  const keys = Object.entries(u).flatMap(([k, v]) => (k === '$set' || k === '$unset' ? Object.keys(v as object) : k === '$setOnInsert' ? [] : [k]));
+  if (keys.some((k) => !VERSION_MUTABLE.has(k))) throw new Error('Une version de devis est figée : son contenu ne se modifie pas');
+});
+quotationVersionSchema.pre(['replaceOne', 'deleteOne', 'deleteMany', 'findOneAndDelete'], function () { throw new Error('Une version de devis ne se supprime pas'); });
+export type QuotationVersionDoc = InferSchemaType<typeof quotationVersionSchema>;
+export const QuotationVersion = model('QuotationVersion', quotationVersionSchema);
+
+// ---- Pièces jointes d'un devis (GridFS « quotationFiles ») ----
+export const QUOTATION_DOC_TYPES = ['price_request', 'specifications', 'catalog', 'datasheet', 'drawing', 'signed_quote', 'customer_confirmation', 'other'] as const;
+const quotationDocumentSchema = new Schema({
+  companyId: oid('Company', true), quotationId: oid('Quotation', true), type: { type: String, enum: QUOTATION_DOC_TYPES, required: true }, description: { type: String, trim: true },
+  /** Version du devis concernée (facultatif). */
+  version: Number,
+  originalName: { type: String, required: true }, fileId: { type: Schema.Types.ObjectId, required: true }, mime: String, size: { type: Number, default: 0 },
+  uploadedBy: oid('User'), uploadedByName: String,
+}, { timestamps: true });
+quotationDocumentSchema.index({ companyId: 1, quotationId: 1, createdAt: -1 });
+export const QuotationDocument = model('QuotationDocument', quotationDocumentSchema);
+
+// ---- Commentaires INTERNES : jamais imprimés ni envoyés ----
+const quotationCommentSchema = new Schema({
+  companyId: oid('Company', true), quotationId: oid('Quotation', true), body: { type: String, required: true, trim: true },
+  authorId: oid('User'), authorName: String, editedAt: Date, editedByName: String,
+  /** Retrait : le commentaire est archivé, jamais effacé. */
+  archivedAt: Date, archivedByName: String,
+}, { timestamps: true });
+quotationCommentSchema.index({ companyId: 1, quotationId: 1, createdAt: -1 });
+export const QuotationComment = model('QuotationComment', quotationCommentSchema);
+
 // ---- Facture proforma (série de numéros distincte des factures définitives) ----
 const proformaSchema = new Schema({
   ...commonDoc, ...paymentTermsFields, number: { type: String, required: true }, issueDate: { type: Date, required: true }, validUntil: { type: Date, required: true },
   status: { type: String, enum: ['pending', 'converted', 'expired', 'cancelled'], default: 'pending' },
   quotationId: oid('Quotation'), invoiceId: oid('Invoice'), terms: { type: String, trim: true }, cancelledAt: Date,
+  /** Version du devis acceptée et convertie. */
+  quotationVersion: Number,
+  deliveryTime: { type: String, trim: true },
 }, { timestamps: true });
 proformaSchema.index({ companyId: 1, number: 1 }, { unique: true });
 proformaSchema.index({ companyId: 1, status: 1, validUntil: 1 });

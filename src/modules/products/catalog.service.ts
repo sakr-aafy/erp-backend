@@ -1,5 +1,6 @@
 import type { Types } from 'mongoose';
 import { Category, Product, Unit } from '../../models/product.model.js';
+import { ensureFixedUnits, FIXED_UNITS, unitDecimals } from './units.js';
 import { AppError } from '../../utils/errors.js';
 
 type Id = Types.ObjectId;
@@ -68,20 +69,22 @@ export async function setCategoryArchived(companyId: Id, id: string, archived: b
   return categoryDto({ ...c, isArchived: archived });
 }
 
-export const listUnits = async (companyId: Id) =>
-  (await Unit.find({ companyId }).sort({ code: 1 }).lean()).map((u) => ({ id: u._id.toString(), code: u.code, name: u.name }));
-export async function createUnit(companyId: Id, d: { code: string; name: string }) {
-  const u = await Unit.create({ companyId, ...d });
-  return { id: u._id.toString(), code: u.code, name: u.name };
+/** Unités : les trois unités fixes d'abord, puis les unités historiques (conservées, non proposées pour les nouveaux articles). */
+export async function listUnits(companyId: Id) {
+  await ensureFixedUnits(companyId);
+  const units = await Unit.find({ companyId }).lean();
+  const rank = (k?: string | null) => { const i = FIXED_UNITS.findIndex((f) => f.key === k); return i < 0 ? FIXED_UNITS.length : i; };
+  return units.sort((a, b) => rank(a.fixedKey) - rank(b.fixedKey) || a.code.localeCompare(b.code, 'fr'))
+    .map((u) => ({ id: u._id.toString(), code: u.code, name: u.name, fixed: !!u.fixedKey, fixedKey: u.fixedKey ?? null, decimals: unitDecimals(u) }));
 }
-export async function updateUnit(companyId: Id, id: string, d: { code?: string | undefined; name?: string | undefined }) {
-  const u = await Unit.findOneAndUpdate({ _id: id, companyId }, d, { returnDocument: 'after', runValidators: true }).lean();
-  if (!u) throw AppError.notFound('Unité introuvable');
-  return { id: u._id.toString(), code: u.code, name: u.name };
-}
+const fixedUnits = () => new AppError(409, 'Les unités de mesure sont fixes : Pièce, Mètre et Kilogramme.', 'UNITS_FIXED');
+export async function createUnit(): Promise<never> { throw fixedUnits(); }
+export async function updateUnit(): Promise<never> { throw fixedUnits(); }
+/** Seule une unité historique inutilisée peut être supprimée. */
 export async function deleteUnit(companyId: Id, id: string) {
   const u = await Unit.findOne({ _id: id, companyId }).lean();
   if (!u) throw AppError.notFound('Unité introuvable');
+  if (u.fixedKey) throw fixedUnits();
   if (await Product.exists({ companyId, unitId: u._id })) throw AppError.conflict('Des articles utilisent cette unité');
   await Unit.deleteOne({ _id: id, companyId });
   return u;

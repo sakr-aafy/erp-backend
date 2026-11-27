@@ -97,5 +97,3 @@ export const importQuery = z.object({ mode: z.enum(['create', 'upsert']).default
 export const categoryBody = z.object({ name: z.string().trim().min(1).max(80), parentId: nullableId }).strict();
 export const categoryArchiveBody = z.object({}).strict();
 export const categoryUpdateBody = z.object({ name: z.string().trim().min(1).max(80) }).strict();
-export const unitBody = z.object({ code: z.string().trim().min(1).max(12), name: z.string().trim().min(1).max(60) }).strict();
-export const unitUpdateBody = unitBody.partial().strict();

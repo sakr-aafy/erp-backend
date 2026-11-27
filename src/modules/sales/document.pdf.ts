@@ -9,9 +9,9 @@ export async function pdfOf(companyId: Types.ObjectId, kind: 'quotation' | 'prof
   // Document antérieur aux adresses multiples : l'adresse de livraison copiée dans le client reste imprimée
   const legacy = d.customer?.shippingAddress;
   const deliveryAddress = d.deliveryAddress ?? (legacy && (legacy.street || legacy.city) ? legacy : undefined);
-  const common = { customer: d.customer, lines: d.lines, totals: d.totals ?? {}, notes: d.notes, terms: d.terms, paymentTerms: d.paymentTerms, deliveryAddress };
+  const common = { customer: d.customer, lines: d.lines, totals: d.totals ?? {}, notes: d.notes, terms: d.terms, paymentTerms: d.paymentTerms, deliveryTime: d.deliveryTime, deliveryAddress };
   switch (kind) {
-    case 'quotation': return renderDocumentPdf(companyId, { ...common, layout: 'quotation', title: 'DEVIS', number: d.number, date: d.issueDate, secondaryDateLabel: 'Valable jusqu’au', secondaryDate: d.validUntil });
+    case 'quotation': return renderDocumentPdf(companyId, { ...common, layout: 'quotation', version: d.version, legacyDiscountPct: d.globalDiscountPct, title: 'DEVIS', number: d.number, date: d.issueDate, secondaryDateLabel: 'Valable jusqu’au', secondaryDate: d.validUntil });
     case 'proforma': return renderDocumentPdf(companyId, { ...common, title: 'FACTURE PROFORMA', mention: 'PROFORMA', number: d.number, date: d.issueDate, secondaryDateLabel: 'Valable jusqu’au', secondaryDate: d.validUntil });
     case 'invoice': return renderDocumentPdf(companyId, { ...common, title: d.type === 'credit_note' ? 'FACTURE D’AVOIR' : 'FACTURE', number: d.number, draft: d.status === 'draft', date: d.issueDate,
       schedule: d.schedule?.length ? d.schedule : undefined, withholdingLabel: d.withholding ? `Retenue à la source ${d.withholding.ratePct} %` : RS['x'],

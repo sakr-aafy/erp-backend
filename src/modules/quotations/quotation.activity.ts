@@ -13,6 +13,9 @@ export const EVENT_LABEL: Record<EventKind, string> = {
   delivery_address_changed: 'Modification de l’adresse de livraison', global_discount_changed: 'Modification de la remise globale', notes_changed: 'Modification des notes et conditions',
   marked_sent: 'Devis marqué comme envoyé', email_sent: 'Devis envoyé par e-mail', accepted: 'Devis accepté', refused: 'Devis refusé', expired: 'Devis expiré', duplicated: 'Duplication du devis',
   converted_proforma: 'Conversion en facture proforma', converted_invoice: 'Conversion en facture', invoice_unlinked: 'Facture brouillon supprimée',
+  delivery_time_changed: 'Modification du délai de livraison', version_created: 'Nouvelle version', version_abandoned: 'Brouillon de version abandonné', cancelled: 'Devis annulé',
+  document_added: 'Document ajouté', document_updated: 'Document modifié', document_removed: 'Document supprimé', comment_added: 'Commentaire ajouté', comment_edited: 'Commentaire modifié', comment_archived: 'Commentaire archivé',
+  migrated: 'Version de référence créée à la migration',
 };
 
 export interface Event {
@@ -34,7 +37,7 @@ interface Line { _id?: Id; productId?: Id | null | undefined; reference?: string
 export interface Version {
   customerSnapshot?: { name?: string | null | undefined } | null | undefined; customerId: Id; lines: Line[]; paymentTerms?: string | null | undefined; validUntil: Date; issueDate: Date;
   deliveryAddress?: { label?: string | null | undefined; street?: string | null | undefined; city?: string | null | undefined; addressId?: Id | null | undefined } | null | undefined;
-  globalDiscountPct?: number | null | undefined; globalDiscountMinor?: number | null | undefined; notes?: string | null | undefined; terms?: string | null | undefined;
+  globalDiscountPct?: number | null | undefined; syncDiscountPct?: number | null | undefined; globalDiscountMinor?: number | null | undefined; deliveryTime?: string | null | undefined; notes?: string | null | undefined; terms?: string | null | undefined;
 }
 const vatText = (v: Line['vat']) => (v.regime === 'taxable' || !v.regime ? `${v.code} (${v.ratePct} %)` : `${v.code} (${({ zero: 'taux zéro', exempt: 'exonéré', suspended: 'suspension' } as Record<string, string>)[v.regime] ?? v.regime})`);
 const addressText = (a: Version['deliveryAddress']) => (a ? [a.label, a.street, a.city].filter(Boolean).join(', ') : null);
@@ -71,6 +74,8 @@ export function diff(before: Version, after: Version): Event[] {
   change('delivery_address_changed', addressText(before.deliveryAddress), addressText(after.deliveryAddress), 'text');
   if ((before.globalDiscountPct ?? 0) !== (after.globalDiscountPct ?? 0)) change('global_discount_changed', before.globalDiscountPct ?? 0, after.globalDiscountPct ?? 0, 'percent');
   if ((before.globalDiscountMinor ?? 0) !== (after.globalDiscountMinor ?? 0)) change('global_discount_changed', before.globalDiscountMinor ?? 0, after.globalDiscountMinor ?? 0, 'money');
+  if ((before.syncDiscountPct ?? 0) !== (after.syncDiscountPct ?? 0)) change('global_discount_changed', before.syncDiscountPct ?? 0, after.syncDiscountPct ?? 0, 'percent');
+  change('delivery_time_changed', before.deliveryTime || null, after.deliveryTime || null, 'text');
   change('notes_changed', [before.notes, before.terms].filter(Boolean).join('\n') || null, [after.notes, after.terms].filter(Boolean).join('\n') || null, 'text');
   return out;
 }

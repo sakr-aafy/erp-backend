@@ -17,9 +17,10 @@ export const enforcePriceRules: RequestHandler = asyncHandler(async (req, _res, 
   const ids = [...new Set(lines.map((l) => l.productId).filter(Boolean) as string[])]; if (!ids.length) return next();
   const prods = await Product.find({ _id: { $in: ids }, companyId: req.auth!.companyId }).select('reference salePriceMinor minSalePriceMinor maxDiscountPct').lean();
   const by = new Map(prods.map((p) => [p._id.toString(), p])); const out: Violation[] = [];
+  const sync = Number(req.body?.syncDiscountPct) || 0; // remise globale en % : elle s’applique à chaque ligne
   lines.forEach((l, i) => {
     const p = l.productId ? by.get(l.productId) : undefined; if (!p) return;
-    const unit = l.unitPriceMinor ?? p.salePriceMinor ?? 0; const disc = l.discountPct ?? 0; const net = unit * (1 - disc / 100);
+    const unit = l.unitPriceMinor ?? p.salePriceMinor ?? 0; const disc = sync > 0 ? sync : l.discountPct ?? 0; const net = unit * (1 - disc / 100);
     if (p.minSalePriceMinor != null && net < p.minSalePriceMinor - 1e-9) out.push({ line: i + 1, reference: p.reference, rule: 'min_price', message: `Ligne ${i + 1} (${p.reference}) : prix net inférieur au prix minimum de vente`, limit: p.minSalePriceMinor, actual: Math.round(net) });
     if (p.maxDiscountPct != null && disc > p.maxDiscountPct + 1e-9) out.push({ line: i + 1, reference: p.reference, rule: 'max_discount', message: `Ligne ${i + 1} (${p.reference}) : remise supérieure à la remise maximale autorisée (${p.maxDiscountPct} %)`, limit: p.maxDiscountPct, actual: disc });
   });

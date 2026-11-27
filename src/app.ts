@@ -17,6 +17,7 @@ import { roleRoutes } from './modules/roles/role.routes.js';
 import { companyRoutes } from './modules/companies/company.routes.js';
 import { settingRoutes } from './modules/settings/setting.routes.js';
 import { customerRoutes } from './modules/customers/customer.routes.js';
+import { paymentTermRoutes } from './modules/payment-terms/payment-term.routes.js';
 import { supplierCategoryRoutes, supplierRoutes } from './modules/suppliers/supplier.routes.js';
 import { productRoutes, categoryRoutes, unitRoutes } from './modules/products/product.routes.js';
 import { fiscalRoutes } from './modules/fiscal/fiscal.routes.js';
@@ -93,6 +94,7 @@ export function createApp() {
   api.use('/accounting', accountingRoutes);
   api.use('/reports', reportRoutes);
   api.use('/customers', customerRoutes);
+  api.use('/payment-terms', paymentTermRoutes);
   api.use('/suppliers', supplierRoutes);
   api.use('/supplier-categories', supplierCategoryRoutes);
   api.use('/products', productRoutes);

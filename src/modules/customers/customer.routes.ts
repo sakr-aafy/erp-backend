@@ -14,6 +14,7 @@ import * as extra from './customer.extra.service.js';
 import { MAX_DOC_BYTES } from './customer.files.js';
 import { customerBalanceCheck } from '../invoices/invoice.service.js';
 import * as v from './customer.validator.js';
+import { findDuplicates } from './contact-keys.js';
 import { Customer } from '../../models/customer.model.js';
 import { DeliveryNote, Invoice, Proforma, Quotation } from '../../models/sales.model.js';
 import { mountDeliveryAddresses } from '../parties/delivery-address.routes.js';
@@ -35,6 +36,8 @@ const uploadOne: RequestHandler = (req, res, next) => upload.single('file')(req,
 // ---- Liste, création, fiche ----
 customerRoutes.get('/', can('customers:view'), validate({ query: v.listQuery }), h(c.list));
 customerRoutes.get('/export', can('customers:view'), validate({ query: v.exportQuery }), h(c.exportList));
+// Rapport des doublons de coordonnées (lecture seule ; la résolution se fait fiche par fiche)
+customerRoutes.get('/duplicates', can('customers:view', 'customers:update'), h(async (req: Request, res: Response) => res.json({ items: await findDuplicates(cid(req)) })));
 customerRoutes.get('/cities', can('customers:view'), h(async (req: Request, res: Response) => res.json(await svc.cities(cid(req)))));
 customerRoutes.post('/', can('customers:create'), validate({ body: v.createCustomerBody }), h(c.create));
 customerRoutes.get('/:id', can('customers:view'), validate({ params: v.idParam }), h(c.get));

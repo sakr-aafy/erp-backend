@@ -126,6 +126,7 @@ categoryRoutes.post('/:id/restore', can('products:update'), validate({ params: v
 export const unitRoutes = Router();
 unitRoutes.use(authenticate);
 unitRoutes.get('/', can('products:view'), h(c.listUnits));
-unitRoutes.post('/', can('products:create'), validate({ body: v.unitBody }), h(c.createUnit));
-unitRoutes.put('/:id', can('products:update'), validate({ params: v.idParam, body: v.unitUpdateBody }), h(c.updateUnit));
+// Unités fixes : la création et la modification répondent 409 (routes conservées pour un message explicite)
+unitRoutes.post('/', can('products:create'), h(c.createUnit));
+unitRoutes.put('/:id', can('products:update'), validate({ params: v.idParam }), h(c.updateUnit));
 unitRoutes.delete('/:id', can('products:delete'), validate({ params: v.idParam }), h(c.deleteUnit));

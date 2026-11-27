@@ -7,6 +7,7 @@ import { objectId } from '../../utils/pagination.js';
 import { withTransaction } from '../../utils/transaction.js';
 import { emitDomainEvent } from '../../services/domain-events.js';
 import { ensureCounter, nextDocumentNumber } from '../../services/numbering.service.js';
+import { assertQuantities, carriedOver } from '../products/units.js';
 
 type Id = Types.ObjectId; type Lean = InventoryDoc & { _id: Id; createdAt?: Date };
 export const createBody = z.object({ warehouseId: objectId, date: z.coerce.date().optional(), notes: z.string().trim().max(1000).optional(), productIds: z.array(objectId).max(500).optional() }).strict();
@@ -52,6 +53,8 @@ export async function saveCounts(companyId: Id, id: string, b: z.infer<typeof up
       const lv = await StockLevel.findOne({ companyId, productId: p._id, warehouseId: inv.warehouseId }).lean();
       inv.lines.push({ productId: p._id, reference: p.reference, designation: p.name, systemQty: lv?.qty ?? 0, countedQty: null, appliedDelta: 0 } as never); l = inv.lines[inv.lines.length - 1]!;
     }
+    // Une quantité comptée égale au stock enregistré (même historique) est acceptée telle quelle
+    await assertQuantities(companyId, [{ productId: c.productId, quantity: c.countedQty, exempt: c.countedQty !== null && carriedOver(c.countedQty, l.systemQty), label: `« ${l.reference} »` }]);
     l.countedQty = c.countedQty;
   }
   if (b.reason !== undefined) inv.reason = b.reason; if (b.notes !== undefined) inv.notes = b.notes;

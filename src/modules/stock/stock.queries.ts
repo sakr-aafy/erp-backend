@@ -8,6 +8,7 @@ import { rangeFilter } from '../sales/document.http.js';
 import { randomUUID } from 'node:crypto';
 import { AppError } from '../../utils/errors.js';
 import type { Column } from '../../services/export.service.js';
+import { assertQuantities } from '../products/units.js';
 
 type Id = Types.ObjectId;
 const oid = (v: string) => new Types.ObjectId(v);
@@ -85,6 +86,7 @@ export const movementColumns = (d: number): Column<Mv>[] => [
 /** Entrée / sortie manuelle (régularisation) : motif obligatoire, traçable, audité. */
 export async function manualMovement(companyId: Id, userId: Id, b: { direction: 'in' | 'out'; productId: string; warehouseId: string; quantity: number; unitCostMinor?: number | undefined; reason: string; serials?: string[] | undefined; allowNegativeStock?: boolean | undefined }) {
   if (b.direction === 'in' && b.unitCostMinor === undefined) throw AppError.badRequest('Coût unitaire requis pour une entrée');
+  await assertQuantities(companyId, [{ productId: b.productId, quantity: b.quantity, label: 'Mouvement' }]);
   await ensureLevels(companyId, [{ productId: b.productId, warehouseId: b.warehouseId }]);
   return withTransaction(async (session) => {
     const r = await applyMovement({ companyId, session, userId, productId: b.productId, warehouseId: b.warehouseId, direction: b.direction, quantity: b.quantity, reason: b.direction === 'in' ? 'manual_in' : 'manual_out', eventKey: `manual:${randomUUID()}`,

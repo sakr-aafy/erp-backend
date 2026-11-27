@@ -25,7 +25,8 @@
     "db:migrate-parties": "tsx src/scripts/migrate-parties.ts",
     "db:migrate-articles": "tsx src/scripts/migrate-articles.ts",
     "db:migrate-suppliers": "tsx src/scripts/migrate-suppliers.ts",
-    "db:migrate-quotations": "tsx src/scripts/migrate-quotations.ts"
+    "db:migrate-quotations": "tsx src/scripts/migrate-quotations.ts",
+    "db:migrate-mission1": "tsx src/scripts/migrate-mission1.ts"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",

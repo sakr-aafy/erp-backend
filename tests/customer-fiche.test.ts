@@ -231,8 +231,8 @@ describe('fiche client — transactions, indicateurs, paiements (chiffres exacts
     expect((await A.j.get(`/customers/${cust}/transactions?type=invoice`)).body.total).toBe(2);
     expect((await A.j.get(`/customers/${cust}/transactions?type=credit_note`)).body.items[0].id).toBe(cn);
     expect((await A.j.get(`/customers/${cust}/transactions?type=invoice&status=partial`)).body.total).toBe(1);
-    expect((await A.j.get(`/customers/${cust}/transactions?type=quotation&status=pending`)).body.total).toBe(1);
-    expect((await A.j.get(`/customers/${cust}/transactions?status=pending`)).body.items.every((r: { kind: string }) => ['quotation', 'proforma'].includes(r.kind))).toBe(true);
+    expect((await A.j.get(`/customers/${cust}/transactions?type=quotation&status=draft`)).body.total).toBe(1);
+    expect((await A.j.get(`/customers/${cust}/transactions?status=pending`)).body.items.every((r: { kind: string }) => r.kind === 'proforma')).toBe(true);
     const n1 = (await A.j.get(`/invoices/${inv1}`)).body.number as string;
     const q = (await A.j.get(`/customers/${cust}/transactions?q=${n1}`)).body; expect(q.items.map((r: { id: string }) => r.id)).toEqual([inv1]);
     const page2 = (await A.j.get(`/customers/${cust}/transactions?limit=4&page=2`)).body; expect(page2.items).toHaveLength(1); expect(page2.total).toBe(5);

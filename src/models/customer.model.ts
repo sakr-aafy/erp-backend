@@ -102,3 +102,17 @@ const customerActivitySchema = new Schema({
 customerActivitySchema.index({ companyId: 1, customerId: 1, occurredAt: -1 });
 export type CustomerActivityDoc = InferSchemaType<typeof customerActivitySchema>;
 export const CustomerActivity = model('CustomerActivity', customerActivitySchema);
+
+/**
+ * Registre d'unicité des e-mails et téléphones (valeurs normalisées) d'une société : clients et contacts confondus.
+ * L'index unique garantit un seul enregistrement par valeur, même sous concurrence. Plusieurs propriétaires ne subsistent que
+ * pour des doublons ANTÉRIEURS à la règle (à résoudre manuellement).
+ */
+const contactKeySchema = new Schema({
+  companyId: { type: Schema.Types.ObjectId, ref: 'Company', required: true },
+  kind: { type: String, enum: ['email', 'phone'], required: true }, value: { type: String, required: true },
+  owners: { type: [new Schema({ customerId: { type: Schema.Types.ObjectId, ref: 'Customer', required: true }, source: { type: String, enum: ['customer', 'contact'], required: true } }, { _id: false })], default: [] },
+}, { versionKey: false });
+contactKeySchema.index({ companyId: 1, kind: 1, value: 1 }, { unique: true });
+contactKeySchema.index({ companyId: 1, 'owners.customerId': 1 });
+export const ContactKey = model('ContactKey', contactKeySchema);

@@ -32,6 +32,10 @@ const settingSchema = new Schema(
     supplierBlockThresholdMinor: { type: Number },
     /** Catégories de fournisseurs proposées par défaut déjà créées : elles ne sont plus recréées ensuite (suppression respectée). */
     supplierCategoriesInitialisedAt: { type: Date },
+    /** Conditions de paiement proposées déjà créées (une condition supprimée ensuite n’est pas recréée). */
+    paymentTermsInitialisedAt: { type: Date },
+    /** Registre d’unicité des téléphones et e-mails clients / contacts déjà constitué. */
+    contactKeysInitialisedAt: { type: Date },
     estimateRates: { type: [estimateRateSchema], default: () => DEFAULT_ESTIMATE_RATES.map((r) => ({ ...r })) },
   },
   { timestamps: true },

@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { setupDb, teardownDb } from './helpers.js';
-import { line, plusDays, salesCompany, type Ctx } from './sales.helpers.js';
+import { line, plusDays, salesCompany, sellByMeter, type Ctx } from './sales.helpers.js';
 import { Customer } from '../src/models/customer.model.js';
 
 let A: Ctx;
-beforeAll(async () => { await setupDb(); A = await salesCompany('Alpha', 'admin@a.test'); });
+beforeAll(async () => { await setupDb(); A = await salesCompany('Alpha', 'admin@a.test'); await sellByMeter(A, A.products.a19, A.products.b13, A.products.c7); });
 afterAll(teardownDb);
 
 const mkInvoice = async (ctx: Ctx, body: object) => { const d = (await ctx.j.post('/invoices', { customerId: ctx.customerId, ...body })).body; const v = await ctx.j.post(`/invoices/${d.id}/validate`); expect(v.status, JSON.stringify(v.body)).toBe(200); return v.body; };
@@ -43,8 +43,8 @@ describe('avoirs partiels avec remise globale', () => {
     const c = await credit(A, v.id, [{ sourceLineId: v.lines[0].id, quantity: 1 }]); expect(c.body.totals).toMatchObject({ totalHtMinor: 95_000, totalVatMinor: 18_050, totalTtcMinor: 113_050 });
     await consistent(A, v.id);
   });
-  it('remise globale EN % : mêmes garanties', async () => {
-    const v = await mkInvoice(A, { globalDiscountPct: 7.5, lines: [line(A.products.a19, 3, { discountPct: 3.3 }), line(A.products.b13, 7), line(A.products.c7, 1)] });
+  it('remise globale EN % (recopiée sur les lignes) : mêmes garanties', async () => {
+    const v = await mkInvoice(A, { syncDiscountPct: 7.5, lines: [line(A.products.a19, 3, { discountPct: 3.3 }), line(A.products.b13, 7), line(A.products.c7, 1)] });
     const ids = v.lines.map((l: { id: string; quantity: number }) => ({ id: l.id, q: l.quantity })); const notes = [];
     for (const [i, q] of [[0, 2], [1, 3], [1, 4], [2, 1], [0, 1]] as [number, number][]) { const r = await credit(A, v.id, [{ sourceLineId: ids[i].id, quantity: q }]); expect(r.status, JSON.stringify(r.body)).toBe(200); notes.push(r.body); }
     expect(sum(notes, 'totalHtMinor')).toBe(v.totals.totalHtMinor); expect(sum(notes, 'totalVatMinor')).toBe(v.totals.totalVatMinor); expect(sum(notes, 'totalTtcMinor')).toBe(v.totals.totalTtcMinor);
@@ -61,14 +61,14 @@ describe('avoirs partiels avec remise globale', () => {
     await Customer.updateOne({ _id: A.customerId }, { subjectToWithholding: false });
   });
   it('interdit tout avoir au-delà des quantités ou montants disponibles', async () => {
-    const v = await mkInvoice(A, { globalDiscountMinor: 5_000, lines: [line(A.products.a19, 2)] }); const id = v.lines[0].id;
-    expect((await credit(A, v.id, [{ sourceLineId: id, quantity: 2.001 }], false)).status).toBe(409);
-    const d1 = await credit(A, v.id, [{ sourceLineId: id, quantity: 1.5 }], false); const d2 = await credit(A, v.id, [{ sourceLineId: id, quantity: 1.5 }], false); // deux brouillons concurrents
+    const v = await mkInvoice(A, { globalDiscountMinor: 5_000, lines: [line(A.products.a19, 8)] }); const id = v.lines[0].id;
+    expect((await credit(A, v.id, [{ sourceLineId: id, quantity: 9 }], false)).status).toBe(409);
+    const d1 = await credit(A, v.id, [{ sourceLineId: id, quantity: 6 }], false); const d2 = await credit(A, v.id, [{ sourceLineId: id, quantity: 6 }], false); // deux brouillons concurrents
     expect((await A.j.post(`/invoices/${d1.body.id}/validate`)).status).toBe(200);
     const r = await A.j.post(`/invoices/${d2.body.id}/validate`); expect(r.status).toBe(409); expect(r.body.error.message).toMatch(/restante|créditable/);
-    expect((await credit(A, v.id, [{ sourceLineId: id, quantity: 0.6 }], false)).status).toBe(409);
-    const last = await credit(A, v.id, [{ sourceLineId: id, quantity: 0.5 }]); expect(last.status).toBe(200);
-    expect((await credit(A, v.id, [{ sourceLineId: id, quantity: 0.001 }], false)).status).toBe(409);
+    expect((await credit(A, v.id, [{ sourceLineId: id, quantity: 3 }], false)).status).toBe(409);
+    const last = await credit(A, v.id, [{ sourceLineId: id, quantity: 2 }]); expect(last.status).toBe(200);
+    expect((await credit(A, v.id, [{ sourceLineId: id, quantity: 1 }], false)).status).toBe(409);
     await consistent(A, v.id); expect((await A.j.get(`/invoices/${v.id}`)).body.creditedMinor).toBe(v.totals.totalPayableMinor);
   });
 });
@@ -120,7 +120,7 @@ describe('avoirs, échéancier, paiements et soldes clients', () => {
         const cur = (await A.j.get(`/invoices/${v.id}`)).body; const r = rnd();
         if (r < 0.4 && cur.balanceDueMinor > 0) { const amt = Math.max(1, Math.floor(cur.balanceDueMinor * (0.2 + rnd() * 0.8))); const p = await A.j.post(`/invoices/${v.id}/payments`, { amountMinor: amt, method: 'cash' }); expect(p.status).toBe(201); pays.push(p.body.payment.id); }
         else if (r < 0.6 && pays.length) await A.j.post(`/invoices/payments/${pays.splice(Math.floor(rnd() * pays.length), 1)[0]}/cancel`, { reason: 'annulation test' });
-        else { const l = v.lines[Math.floor(rnd() * 2)]; const q = Math.round((0.2 + rnd() * 1.5) * 1000) / 1000; const c = await credit(A, v.id, [{ sourceLineId: l.id, quantity: q }]); expect([200, 409]).toContain(c.status); }
+        else { const l = v.lines[Math.floor(rnd() * 2)]; const q = Math.round((0.2 + rnd() * 1.5) * 10) / 10; const c = await credit(A, v.id, [{ sourceLineId: l.id, quantity: q }]); expect([200, 409]).toContain(c.status); }
         await consistent(A, v.id);
       }
     }

@@ -24,7 +24,8 @@ export const customerBody = z.object({
   social: z.object({ facebook: urlField, linkedin: urlField, instagram: urlField }).strict().optional(),
   mapsUrl: urlField,
   paymentMethod: z.enum(CUSTOMER_PAYMENT_METHODS).nullable().optional(),
-  discountPct: z.number().min(0, 'Remise entre 0 et 100 %').max(100, 'Remise entre 0 et 100 %').multipleOf(0.01).optional(),
+  /** Remise habituelle proposée sur les lignes : un chiffre après la virgule. */
+  discountPct: z.number().min(0, 'Remise entre 0 et 100 %').max(100, 'Remise entre 0 et 100 %').refine((d) => Math.abs(d * 10 - Math.round(d * 10)) < 1e-6, 'Remise : un seul chiffre après la virgule').optional(),
   creditLimitMinor: minorInt.nullable().optional(),
   subjectToWithholding: z.boolean().optional(),
   stampExempt: z.boolean().optional(),
@@ -55,6 +56,8 @@ export const listFilters = {
   type: z.enum(CUSTOMER_TYPES).optional(),
   city: z.string().trim().max(80).optional(),
   debtors: boolQuery.optional(),
+  /** Client choisi dans les suggestions : la liste est limitée à sa fiche. */
+  customerId: objectId.optional(),
 };
 export const listQuery = paginationQuery.extend(listFilters);
 export const exportQuery = z.object({ q: z.string().trim().max(100).optional(), ...listFilters, format: exportFormat });

@@ -1,12 +1,12 @@
 /**
- * Gestion des devis : cinq statuts et transitions, positions et identifiants des lignes, PDF (remise conditionnelle),
+ * Gestion des devis : statuts et transitions, positions et identifiants des lignes, PDF (remise conditionnelle),
  * historique des activités (immuable, sans doublon), conversions, isolation, permissions et migration.
  */
 import mongoose from 'mongoose';
 import nodemailer from 'nodemailer';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { binaryParser, login, makeUser, pdfText, setupDb, teardownDb } from './helpers.js';
-import { J, api, line, plusDays, quoteBody, salesCompany, type Ctx } from './sales.helpers.js';
+import { J, acceptQuote, api, line, plusDays, quoteBody, refuseQuote, salesCompany, sendQuote, type Ctx } from './sales.helpers.js';
 import { Quotation, QuotationActivity } from '../src/models/sales.model.js';
 import { Product } from '../src/models/product.model.js';
 import { setMailTransport } from '../src/services/mail.service.js';
@@ -33,57 +33,59 @@ const pdfOfQuote = async (id: string, c: Ctx = A) => { const r = await api().get
 const columns = ['Pos.', 'Référence', 'Désignation', 'Qté', 'P.U. HT', 'Rem.%', 'TVA', 'Total HT'];
 
 describe('statuts et transitions', () => {
-  it('création « En attente » ; marquage manuel « Envoyé » avec date, utilisateur, mode et destinataire', async () => {
-    const q = await mk(); expect(q).toMatchObject({ status: 'pending', statusLabel: 'En attente', editable: true, sentAt: null });
+  it('création « Brouillon » ; marquage manuel « Envoyé » avec date, utilisateur, mode et destinataire', async () => {
+    const q = await mk(); expect(q).toMatchObject({ status: 'draft', statusLabel: 'Brouillon', editable: true, sentAt: null });
     expect((await A.j.post(`/quotations/${q.id}/mark-sent`, {})).status).toBe(422);
     expect((await A.j.post(`/quotations/${q.id}/mark-sent`, { method: 'email' })).status).toBe(422); // l’e-mail passe par un envoi réel
     const r = await A.j.post(`/quotations/${q.id}/mark-sent`, { method: 'hand', recipient: 'M. Salah', note: 'En agence' });
     expect(r.status).toBe(200); expect(r.body).toMatchObject({ status: 'sent', statusLabel: 'Envoyé', sentMethod: 'hand', sentMethodLabel: 'Remise en main propre', sentTo: 'M. Salah', sentBy: 'Admin Alpha', editable: false });
     expect(r.body.sentAt).toBeTruthy();
-    expect((await A.j.post(`/quotations/${q.id}/mark-sent`, { method: 'post' })).status).toBe(409);
     expect((await A.j.put(`/quotations/${q.id}`, edit(r.body))).status).toBe(409); // un devis envoyé ne se modifie plus silencieusement
-    expect((await events(q.id))[0]).toMatchObject({ kind: 'marked_sent', user: 'Admin Alpha', oldValue: 'En attente', newValue: 'Envoyé' });
+    expect((await events(q.id))[0]).toMatchObject({ kind: 'marked_sent', user: 'Admin Alpha', oldValue: 'Brouillon', newValue: 'Envoyé' });
+    expect((await A.j.post(`/quotations/${q.id}/mark-sent`, { method: 'post' })).body).toMatchObject({ status: 'sent', version: 1, sentMethod: 'post' }); // nouvel envoi identique
   });
   it('envoi par e-mail réussi → Envoyé ; échec SMTP ou SMTP absent → aucun changement, aucune activité', async () => {
     setMailTransport(null); const q = await mk();
     expect((await A.j.post(`/quotations/${q.id}/send`, {})).status).toBe(503);
     smtp(true); const fail = await A.j.post(`/quotations/${q.id}/send`, {}); expect(fail.status).toBe(502); expect(fail.body.error.code).toBe('MAIL_FAILED');
-    expect((await A.j.get(`/quotations/${q.id}`)).body).toMatchObject({ status: 'pending', sentAt: null }); expect(await kinds(q.id)).toEqual(['created']);
+    expect((await A.j.get(`/quotations/${q.id}`)).body).toMatchObject({ status: 'draft', sentAt: null }); expect(await kinds(q.id)).toEqual(['created']);
     smtp(); const ok = await A.j.post(`/quotations/${q.id}/send`, { to: 'achats@client.tn' }); expect(ok.status).toBe(200);
     expect(sent.at(-1)!).toMatchObject({ to: 'achats@client.tn' }); expect(sent.at(-1)!.attachments[0]!.content.subarray(0, 4).toString()).toBe('%PDF');
     expect((await A.j.get(`/quotations/${q.id}`)).body).toMatchObject({ status: 'sent', sentMethod: 'email', sentTo: 'achats@client.tn', sentBy: 'Admin Alpha' });
     expect(await kinds(q.id)).toEqual(['created', 'email_sent']);
-    await A.j.post(`/quotations/${q.id}/accept`); expect((await A.j.post(`/quotations/${q.id}/send`, {})).status).toBe(200);
-    expect((await A.j.get(`/quotations/${q.id}`)).body.status).toBe('accepted'); // un renvoi ne change pas la décision
+    await A.j.post(`/quotations/${q.id}/accept`); const n = sent.length; expect((await A.j.post(`/quotations/${q.id}/send`, {})).status).toBe(409);
+    expect(sent.length).toBe(n); // refusé avant tout envoi
   });
-  it('acceptation et refus depuis En attente ou Envoyé, avec commentaire / motif ; transitions incohérentes refusées', async () => {
-    const a = await mk(); const ok = await A.j.post(`/quotations/${a.id}/accept`, { comment: 'Bon pour accord par téléphone' });
-    expect(ok.body).toMatchObject({ status: 'accepted', acceptedBy: 'Admin Alpha', acceptanceNote: 'Bon pour accord par téléphone', editable: false });
+  it('acceptation et refus d’un devis envoyé, avec commentaire / motif ; transitions incohérentes refusées', async () => {
+    const a = await mk(); expect((await A.j.post(`/quotations/${a.id}/accept`)).body.error.message).toMatch(/Transition impossible/);
+    await sendQuote(A.j, a.id); const ok = await A.j.post(`/quotations/${a.id}/accept`, { comment: 'Bon pour accord par téléphone' });
+    expect(ok.body).toMatchObject({ status: 'accepted', acceptedVersion: 1, acceptedBy: 'Admin Alpha', acceptanceNote: 'Bon pour accord par téléphone', editable: false });
     const b = await mk(); await A.j.post(`/quotations/${b.id}/mark-sent`, { method: 'post' });
     const ko = await A.j.post(`/quotations/${b.id}/refuse`, { reason: 'Prix trop élevé' }); expect(ko.body).toMatchObject({ status: 'refused', refusalReason: 'Prix trop élevé', refusedBy: 'Admin Alpha' });
-    expect((await A.j.post(`/quotations/${(await mk()).id}/refuse`)).body.status).toBe('refused'); // motif facultatif
+    expect((await refuseQuote(A.j, (await mk()).id)).body.status).toBe('refused'); // motif facultatif
     for (const q of [a, b]) for (const [action, body] of [['accept', {}], ['refuse', {}], ['mark-sent', { method: 'hand' }]] as const) {
-      const r = await A.j.post(`/quotations/${q.id}/${action}`, body); expect(r.status, `${q.number} ${action}`).toBe(409); expect(r.body.error.message).toMatch(/Transition impossible/);
+      const r = await A.j.post(`/quotations/${q.id}/${action}`, body); expect(r.status, `${q.number} ${action}`).toBe(409); expect(r.body.error.message).toMatch(/Transition impossible|Envoi impossible/);
     }
     expect((await A.j.put(`/quotations/${a.id}`, edit(ok.body))).status).toBe(409);
     for (const q of [a, b]) expect((await A.j.del(`/quotations/${q.id}`)).status).toBe(409); // conservés avec leur historique
     expect(await kinds(b.id)).toEqual(['created', 'marked_sent', 'refused']);
-    expect((await A.j.post(`/quotations/${b.id}/convert-invoice`)).status).toBe(409);
+    expect((await A.j.post(`/quotations/${b.id}/convert-invoice`)).status).toBe(410);
   });
-  it('expiration automatique persistée (en attente et envoyé), jamais pour accepté ou refusé, historisée une seule fois', async () => {
-    const [p, s, a, r] = [await mk(), await mk(), await mk(), await mk()];
-    await A.j.post(`/quotations/${s.id}/mark-sent`, { method: 'phone' }); await A.j.post(`/quotations/${a.id}/accept`); await A.j.post(`/quotations/${r.id}/refuse`);
-    await Quotation.updateMany({ _id: { $in: [p.id, s.id, a.id, r.id] } }, { validUntil: new Date(plusDays(-1)), issueDate: new Date(plusDays(-10)) });
+  it('expiration automatique persistée des devis envoyés seulement, historisée une seule fois', async () => {
+    const [d, st, a, r] = [await mk(), await mk(), await mk(), await mk()];
+    await sendQuote(A.j, st.id); await acceptQuote(A.j, a.id); await refuseQuote(A.j, r.id);
+    await Quotation.updateMany({ _id: { $in: [d.id, st.id, a.id, r.id] } }, { validUntil: new Date(plusDays(-1)), issueDate: new Date(plusDays(-10)) });
     await Promise.all([expireOverdue(), expireOverdue(), expireOverdue()]); await expireOverdue();
     const status = async (id: string) => (await Quotation.findById(id).lean())!.status;
-    expect([await status(p.id), await status(s.id), await status(a.id), await status(r.id)]).toEqual(['expired', 'expired', 'accepted', 'refused']);
-    for (const id of [p.id, s.id]) { const e = (await events(id)).filter((x) => x.kind === 'expired'); expect(e).toHaveLength(1); expect(e[0]).toMatchObject({ system: true, user: 'Système', newValue: 'Expiré' }); }
-    expect((await events(a.id)).some((e) => e.kind === 'expired')).toBe(false);
-    for (const action of ['accept', 'refuse']) expect((await A.j.post(`/quotations/${p.id}/${action}`)).status).toBe(409);
-    expect((await A.j.post(`/quotations/${p.id}/convert-proforma`, {})).status).toBe(409);
+    expect([await status(d.id), await status(st.id), await status(a.id), await status(r.id)]).toEqual(['draft', 'expired', 'accepted', 'refused']);
+    const e = (await events(st.id)).filter((x) => x.kind === 'expired'); expect(e).toHaveLength(1); expect(e[0]).toMatchObject({ system: true, user: 'Système', newValue: 'Expiré' });
+    expect((await events(a.id)).some((x) => x.kind === 'expired')).toBe(false);
+    for (const action of ['accept', 'refuse']) expect((await A.j.post(`/quotations/${st.id}/${action}`)).status).toBe(409);
+    expect((await A.j.post(`/quotations/${st.id}/convert-proforma`, {})).status).toBe(409);
+    expect((await A.j.post(`/quotations/${d.id}/mark-sent`, { method: 'hand' })).body.error.message).toMatch(/validité est dépassée/); // un brouillon périmé se corrige avant l’envoi
   });
   it('rapport, fiche client et fiche article reflètent l’expiration sans attendre le contrôle horaire', async () => {
-    const overdue = async () => { const q = await mk(); await Quotation.updateOne({ _id: q.id }, { validUntil: new Date(plusDays(-1)), issueDate: new Date(plusDays(-10)) }); return q; };
+    const overdue = async () => { const q = await mk(); await sendQuote(A.j, q.id); await Quotation.updateOne({ _id: q.id }, { validUntil: new Date(plusDays(-1)), issueDate: new Date(plusDays(-10)) }); return q; };
     const statusInDb = async (id: string) => (await Quotation.findById(id).lean())!.status;
     for (const url of ['/reports/quotations', `/customers/${A.customerId}/transactions?type=quotation`, `/products/${A.products.a19}/transactions?type=quotation`]) {
       const q = await overdue(); expect((await A.j.get(url)).status, url).toBe(200); expect(await statusInDb(q.id), url).toBe('expired');
@@ -91,14 +93,14 @@ describe('statuts et transitions', () => {
   });
   it('filtre par statut, compteurs réels, tri et recherche', async () => {
     const stats = (await A.j.get('/quotations/stats')).body;
-    for (const st of ['pending', 'sent', 'accepted', 'refused', 'expired']) {
+    for (const st of ['draft', 'sent', 'accepted', 'refused', 'expired', 'cancelled']) {
       const l = (await A.j.get(`/quotations?status=${st}&limit=100`)).body; expect(l.total, st).toBe(stats[st]); expect(l.items.every((q: { status: string }) => q.status === st)).toBe(true);
     }
-    expect(stats.total).toBe(stats.pending + stats.sent + stats.accepted + stats.refused + stats.expired);
+    expect(stats.total).toBe(stats.draft + stats.sent + stats.accepted + stats.refused + stats.expired + stats.cancelled);
     for (const sort of ['totalTtcMinor', '-totalHtMinor', 'customer', 'validUntil', '-number']) expect((await A.j.get(`/quotations?sort=${sort}`)).status, sort).toBe(200);
     const one = (await A.j.get('/quotations?limit=1')).body.items[0]; expect((await A.j.get(`/quotations?q=${one.number}`)).body.total).toBe(1);
     expect((await A.j.get(`/quotations?from=${plusDays(1)}`)).body.total).toBe(0);
-    const rep = (await A.j.get(`/reports/quotations`)).body; expect(rep.rows.map((x: { statusKey: string }) => x.statusKey)).toEqual(['pending', 'sent', 'accepted', 'refused', 'expired']);
+    const rep = (await A.j.get(`/reports/quotations`)).body; expect(rep.rows.map((x: { statusKey: string }) => x.statusKey)).toEqual(['draft', 'sent', 'accepted', 'refused', 'expired', 'cancelled']);
   });
 });
 
@@ -135,7 +137,7 @@ describe('historique des activités', () => {
     expect(await kinds(q.id)).toEqual(['created']);
     expect((await A.j.put(`/quotations/${q.id}`, edit(q))).status).toBe(200); expect(await kinds(q.id)).toEqual(['created']); // rien n'a changé
     const [l1] = q.lines;
-    const r = await A.j.put(`/quotations/${q.id}`, edit(q, [asInput(l1, { unitPriceMinor: 185_000, discountPct: 5, quantity: 2 }), { productId: A.products.c7, quantity: 1 }], { paymentTerms: '60 jours', validUntil: plusDays(45), globalDiscountPct: 2, notes: 'Livraison incluse' }));
+    const r = await A.j.put(`/quotations/${q.id}`, edit(q, [asInput(l1, { unitPriceMinor: 185_000, discountPct: 5, quantity: 2 }), { productId: A.products.c7, quantity: 1 }], { paymentTerms: '60 jours', validUntil: plusDays(45), globalDiscountMinor: 1_000, notes: 'Livraison incluse' }));
     expect(r.status).toBe(200);
     const list = await events(q.id); const of = (k: string) => list.find((e) => e.kind === k)!;
     expect(list.map((e) => e.kind).sort()).toEqual(['created', 'discount_changed', 'global_discount_changed', 'line_added', 'line_removed', 'notes_changed', 'payment_terms_changed', 'price_changed', 'quantity_changed', 'validity_changed']);
@@ -146,7 +148,7 @@ describe('historique des activités', () => {
     expect((await events(q.id)).length).toBe(list.length); // persistance sans doublon
     const filtered = (await A.j.get(`/quotations/${q.id}/activities?kind=price_changed`)).body; expect(filtered.total).toBe(1); expect(filtered.kinds.map((k: { value: string }) => k.value)).toContain('created');
     const page = (await A.j.get(`/quotations/${q.id}/activities?limit=3&page=2`)).body; expect(page.items).toHaveLength(3); expect(page.total).toBe(list.length);
-    const d = await A.j.put(`/quotations/${q.id}`, edit(r.body, [asInput(r.body.lines[1]), asInput(r.body.lines[0])], { paymentTerms: '60 jours', globalDiscountPct: 2, notes: 'Livraison incluse' }));
+    const d = await A.j.put(`/quotations/${q.id}`, edit(r.body, [asInput(r.body.lines[1]), asInput(r.body.lines[0])], { paymentTerms: '60 jours', globalDiscountMinor: 1_000, notes: 'Livraison incluse' }));
     expect(d.status).toBe(200); expect((await events(q.id))[0]!.kind).toBe('lines_reordered');
   });
   it('échec : aucune activité ; l’historique ne se modifie ni ne se supprime', async () => {
@@ -160,20 +162,16 @@ describe('historique des activités', () => {
     await expect(QuotationActivity.updateOne({ _id: id }, { title: 'Falsifié' })).rejects.toThrow(/ne se modifie/);
     await expect(QuotationActivity.deleteOne({ _id: id })).rejects.toThrow(/ne se modifie/);
   });
-  it('duplication et conversions : événements, documents liés, double conversion refusée, facture brouillon supprimée', async () => {
-    const q = await mk(); await A.j.post(`/quotations/${q.id}/mark-sent`, { method: 'hand' });
-    const copy = (await A.j.post(`/quotations/${q.id}/duplicate`)).body; expect(copy).toMatchObject({ status: 'pending', duplicatedFromId: q.id }); expect(copy.lines[0].id).not.toBe(q.lines[0].id);
+  it('duplication et conversion en proforma : événements, documents liés, double conversion refusée', async () => {
+    const q = await mk(); await sendQuote(A.j, q.id);
+    const copy = (await A.j.post(`/quotations/${q.id}/duplicate`)).body; expect(copy).toMatchObject({ status: 'draft', version: 1, duplicatedFromId: q.id }); expect(copy.lines[0].id).not.toBe(q.lines[0].id);
     expect((await events(q.id))[0]).toMatchObject({ kind: 'duplicated', related: { type: 'quotation', id: copy.id, number: copy.number } });
     expect((await events(copy.id))[0]).toMatchObject({ kind: 'created', related: { id: q.id, number: q.number } });
-    const inv = await A.j.post(`/quotations/${q.id}/convert-invoice`); expect(inv.status, JSON.stringify(inv.body)).toBe(201);
-    expect(await kinds(q.id)).toEqual(['created', 'marked_sent', 'duplicated', 'accepted', 'converted_invoice']);
-    expect((await events(q.id))[0]!.related).toMatchObject({ type: 'invoice', id: inv.body.invoiceId });
-    expect((await A.j.post(`/quotations/${q.id}/convert-invoice`)).status).toBe(409); expect((await A.j.post(`/quotations/${q.id}/convert-proforma`, {})).status).toBe(409);
-    expect((await A.j.del(`/invoices/${inv.body.invoiceId}`)).status).toBe(204);
-    expect((await events(q.id))[0]!.kind).toBe('invoice_unlinked'); expect((await A.j.get(`/quotations/${q.id}`)).body).toMatchObject({ status: 'accepted', invoiceId: null });
-    const pf = await A.j.post(`/quotations/${copy.id}/convert-proforma`, {}); expect(pf.status).toBe(201);
-    expect((await events(copy.id))[0]).toMatchObject({ kind: 'converted_proforma', related: { type: 'proforma', number: pf.body.number } });
-    expect(await kinds(copy.id)).toEqual(['created', 'accepted', 'converted_proforma']);
+    await A.j.post(`/quotations/${q.id}/accept`);
+    const pf = await A.j.post(`/quotations/${q.id}/convert-proforma`, {}); expect(pf.status, JSON.stringify(pf.body)).toBe(201);
+    expect((await events(q.id))[0]).toMatchObject({ kind: 'converted_proforma', related: { type: 'proforma', number: pf.body.number } });
+    expect(await kinds(q.id)).toEqual(['created', 'marked_sent', 'duplicated', 'accepted', 'converted_proforma']);
+    expect((await A.j.post(`/quotations/${q.id}/convert-proforma`, {})).status).toBe(409); expect((await A.j.del(`/quotations/${q.id}`)).status).toBe(409);
   });
   it('isolation multi-société et permissions', async () => {
     const q = await mk();
@@ -205,10 +203,10 @@ describe('PDF : affichage conditionnel de la remise', () => {
     expect(row('A19')[4]).toBe('10 %'); expect(row('C7')[4]).toBe('\x97'); expect(row('B13')[4]).toBe('5 %'); expect(txt).not.toContain('0 %');
     for (const amount of ['180,000', '150,000', '4\xa0940,000']) expect(txt.some((t) => t.replace(/\u00a0/g, '\xa0') === amount), amount).toBe(true);
   });
-  it('remise globale ou en montant seule : récapitulatif uniquement, pas de colonne ; totaux identiques au serveur', async () => {
-    for (const extra of [{ globalDiscountPct: 10 }, { globalDiscountMinor: 5_000 }]) {
+  it('remise supplémentaire en montant seule : récapitulatif uniquement, pas de colonne ; totaux identiques au serveur', async () => {
+    for (const extra of [{ globalDiscountMinor: 5_000 }]) {
       const q = await mk([line(A.products.a19, 2)], extra); const txt = pdfText(await pdfOfQuote(q.id)).split('\n');
-      expect(txt).not.toContain('Rem.%'); expect(txt).toContain('Remises');
+      expect(txt).not.toContain('Rem.%'); expect(txt).toContain('Remise suppl\xe9mentaire');
       const ttc = (q.totals.totalTtcMinor / 1000).toFixed(3).replace('.', ','); expect(txt.map((t) => t.replace(/\s/g, ''))).toContain(ttc.replace(/\s/g, ''));
     }
   });

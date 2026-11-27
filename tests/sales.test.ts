@@ -1,7 +1,7 @@
 import nodemailer from 'nodemailer';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { binaryParser, login, makeUser, pdfText, setupDb, teardownDb } from './helpers.js';
-import { J, line, plusDays, quoteBody, salesCompany, api, type Ctx } from './sales.helpers.js';
+import { J, line, plusDays, quoteBody, salesCompany, api, type Ctx, acceptQuote, refuseQuote, sendQuote } from './sales.helpers.js';
 import { Counter } from '../src/models/counter.model.js';
 import { Customer } from '../src/models/customer.model.js';
 import { FiscalRule } from '../src/models/fiscal-rule.model.js';
@@ -22,9 +22,9 @@ afterAll(async () => { setMailTransport(null); await teardownDb(); });
 describe('devis', () => {
   it('numérotation DEV-AAAA-000001 séquentielle, calculs HT/TVA/TTC côté serveur', async () => {
     const r = await q1(A, 2);
-    expect(r.status).toBe(201); expect(r.body.number).toBe(`DEV-${Y}-000001`); expect(r.body.status).toBe('pending');
+    expect(r.status).toBe(201); expect(r.body.number).toBe(`DEV-${Y}-000001`); expect(r.body.status).toBe('draft');
     expect(r.body.totals).toMatchObject({ totalHtMinor: 200_000, totalVatMinor: 38_000, totalTtcMinor: 238_000 });
-    expect(r.body.lines[0]).toMatchObject({ reference: 'A19', unit: 'PCE', vat: { code: 'T19', ratePct: 19, regime: 'taxable' } });
+    expect(r.body.lines[0]).toMatchObject({ reference: 'A19', unit: 'PC', vat: { code: 'T19', ratePct: 19, regime: 'taxable' } });
     expect((await q1(A)).body.number).toBe(`DEV-${Y}-000002`);
     expect((await q1(B)).body.number).toBe(`DEV-${Y}-000001`); // série propre à chaque société
   });
@@ -51,52 +51,55 @@ describe('devis', () => {
     await bad(quoteBody(A, [line(A.products.a19, 1.2345)]), 422);
     await bad({ ...quoteBody(A, [line(A.products.a19)]), number: 'DEV-FAKE' }, 422); // numéro non imposable par le client
   });
-  it('statuts : accepter / refuser ; modification limitée aux devis en attente', async () => {
-    const q = (await q1(A)).body;
+  it('statuts : brouillon modifiable ; accepter / refuser un devis envoyé seulement', async () => {
+    const q = (await q1(A)).body; expect(q.status).toBe('draft');
     expect((await A.j.put(`/quotations/${q.id}`, quoteBody(A, [line(A.products.a19, 3)]))).body.totals.totalHtMinor).toBe(300_000);
-    expect((await A.j.post(`/quotations/${q.id}/accept`)).body.status).toBe('accepted');
+    expect((await A.j.post(`/quotations/${q.id}/accept`)).status).toBe(409); // jamais envoyé
+    expect((await acceptQuote(A.j, q.id)).body.status).toBe('accepted');
     expect((await A.j.post(`/quotations/${q.id}/refuse`)).status).toBe(409);
     expect((await A.j.put(`/quotations/${q.id}`, quoteBody(A, [line(A.products.a19, 1)]))).status).toBe(409);
-    const r = (await q1(A)).body; expect((await A.j.post(`/quotations/${r.id}/refuse`)).body.status).toBe('refused');
+    const r = (await q1(A)).body; expect((await refuseQuote(A.j, r.id)).body.status).toBe('refused');
     expect((await A.j.post(`/quotations/${r.id}/convert-proforma`)).status).toBe(409);
     expect((await A.j.post(`/quotations/${r.id}/accept`)).status).toBe(409);
   });
-  it('expiration automatique après la date de validité (persistée)', async () => {
-    const q = (await q1(A)).body;
+  it('expiration automatique d’un devis envoyé après la date de validité (persistée)', async () => {
+    const q = (await q1(A)).body; await sendQuote(A.j, q.id);
     await Quotation.updateOne({ _id: q.id }, { validUntil: new Date(Date.now() - 3 * 86400000) });
     expect((await A.j.get(`/quotations/${q.id}`)).body.status).toBe('expired');
     expect((await Quotation.findById(q.id))!.status).toBe('expired'); // écrit en base, pas seulement affiché
     expect((await A.j.post(`/quotations/${q.id}/accept`)).status).toBe(409);
-    expect((await A.j.post(`/quotations/${q.id}/convert-invoice`)).status).toBe(409);
+    expect((await A.j.post(`/quotations/${q.id}/convert-proforma`)).status).toBe(409);
     expect((await A.j.get('/quotations?status=expired')).body.items.map((x: { id: string }) => x.id)).toContain(q.id);
   });
-  it('duplication : nouveau numéro, statut en attente, lignes et remises copiées', async () => {
-    const src = (await A.j.post('/quotations', quoteBody(A, [line(A.products.a19, 2, { discountPct: 10 })], { globalDiscountPct: 5 }))).body;
-    await A.j.post(`/quotations/${src.id}/refuse`);
+  it('duplication : nouveau numéro, brouillon version 1, lignes et remises copiées', async () => {
+    const src = (await A.j.post('/quotations', quoteBody(A, [line(A.products.a19, 2, { discountPct: 10 })], { globalDiscountMinor: 5_000 }))).body;
+    await refuseQuote(A.j, src.id);
     const d = await A.j.post(`/quotations/${src.id}/duplicate`);
-    expect(d.status).toBe(201); expect(d.body.number).not.toBe(src.number); expect(d.body.status).toBe('pending');
-    expect(d.body.totals.totalHtMinor).toBe(src.totals.totalHtMinor); expect(d.body.globalDiscountPct).toBe(5);
+    expect(d.status).toBe(201); expect(d.body.number).not.toBe(src.number); expect(d.body).toMatchObject({ status: 'draft', version: 1, duplicatedFromId: src.id });
+    expect(d.body.totals.totalHtMinor).toBe(src.totals.totalHtMinor); expect(d.body.globalDiscountMinor).toBe(5_000);
   });
-  it('conversion en proforma (série PRO distincte) : le devis devient accepté, double conversion refusée', async () => {
+  it('conversion : devis accepté uniquement, vers une proforma (série PRO distincte) ; double conversion refusée', async () => {
     const q = (await q1(A, 2)).body;
+    expect((await A.j.post(`/quotations/${q.id}/convert-proforma`)).status).toBe(409);
+    await acceptQuote(A.j, q.id);
     const c = await A.j.post(`/quotations/${q.id}/convert-proforma`);
-    expect(c.status).toBe(201); expect(c.body.number).toMatch(new RegExp(`^PRO-${Y}-\\d{6}$`));
+    expect(c.status).toBe(201); expect(c.body).toMatchObject({ quotationVersion: 1 }); expect(c.body.number).toMatch(new RegExp(`^PRO-${Y}-\\d{6}$`));
     const after = (await A.j.get(`/quotations/${q.id}`)).body;
     expect(after).toMatchObject({ status: 'accepted', proformaId: c.body.proformaId, editable: false });
     expect((await A.j.post(`/quotations/${q.id}/convert-proforma`)).status).toBe(409);
-    expect((await A.j.post(`/quotations/${q.id}/convert-invoice`)).status).toBe(409); // déjà converti : facturer la proforma
+    expect((await A.j.post(`/quotations/${q.id}/convert-invoice`)).status).toBe(410); // conversion supprimée
     const p = (await A.j.get(`/proformas/${c.body.proformaId}`)).body;
-    expect(p).toMatchObject({ status: 'pending', quotationId: q.id }); expect(p.totals.totalTtcMinor).toBe(238_000);
+    expect(p).toMatchObject({ status: 'pending', quotationId: q.id, quotationVersion: 1 }); expect(p.totals.totalTtcMinor).toBe(238_000);
   });
-  it('suppression : refusée si converti ou accepté', async () => {
+  it('suppression : brouillon jamais envoyé seulement', async () => {
     const q = (await q1(A)).body; expect((await A.j.del(`/quotations/${q.id}`)).status).toBe(204);
-    const a = (await q1(A)).body; await A.j.post(`/quotations/${a.id}/accept`); expect((await A.j.del(`/quotations/${a.id}`)).status).toBe(409);
+    const a = (await q1(A)).body; await sendQuote(A.j, a.id); expect((await A.j.del(`/quotations/${a.id}`)).status).toBe(409);
   });
-  it('statistiques : devis en cours et taux de conversion en facture', async () => {
+  it('statistiques : compteurs par statut et taux de transformation', async () => {
     const s = (await A.j.get('/quotations/stats')).body;
-    expect(s.total).toBeGreaterThan(5); expect(s.pending).toBeGreaterThan(0); expect(s.conversionRatePct).toBe(0);
-    const q = (await q1(A)).body; await A.j.post(`/quotations/${q.id}/convert-invoice`);
-    expect((await A.j.get('/quotations/stats')).body.invoiced).toBe(1);
+    expect(s.total).toBeGreaterThan(5); expect(s.draft).toBeGreaterThan(0); expect(s.converted).toBe(1);
+    const q = (await q1(A)).body; await acceptQuote(A.j, q.id); await A.j.post(`/quotations/${q.id}/convert-proforma`);
+    expect((await A.j.get('/quotations/stats')).body.converted).toBe(2);
   });
   it('PDF et envoi par e-mail (SMTP simulé) ; 503 sans SMTP', async () => {
     const q = (await q1(A)).body;
@@ -323,8 +326,8 @@ describe('isolation, permissions, intégrité', () => {
     expect((await del.del(`/invoices/${d.id}`)).status).toBe(204);
     const d2 = await draftInvoice(A); expect((await val.post(`/invoices/${d2.id}/validate`)).status).toBe(200);
     const qv = await mk('qv@a.test', ['quotations:view']); expect((await qv.post('/quotations', quoteBody(A, [line(A.products.a19)]))).status).toBe(403);
-    const q = (await q1(A)).body; expect((await qv.post(`/quotations/${q.id}/convert-invoice`)).status).toBe(403);
-    const qu = await mk('qu@a.test', ['quotations:update']); expect((await qu.post(`/quotations/${q.id}/convert-invoice`)).status).toBe(403); // exige aussi invoices:create
+    const q = (await q1(A)).body; expect((await qv.post(`/quotations/${q.id}/convert-proforma`)).status).toBe(403);
+    const qu = await mk('qu@a.test', ['quotations:update']); expect((await qu.post(`/quotations/${q.id}/convert-proforma`)).status).toBe(403); // exige aussi proformas:create
   });
   it('clients et articles référencés par des documents ne sont pas supprimables (reference-guard)', async () => {
     const c = (await A.j.post('/customers', { name: 'À protéger' })).body.id as string; await A.j.post('/quotations', { customerId: c, validUntil: plusDays(5), lines: [line(A.products.c7)] });

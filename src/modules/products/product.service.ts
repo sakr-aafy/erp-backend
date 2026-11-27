@@ -1,4 +1,5 @@
 import type { ClientSession, QueryFilter as FilterQuery, Types } from 'mongoose';
+import { ensureFixedUnits, matchFixed, unitDecimals } from './units.js';
 import { Category, PRODUCT_STATUSES, Product, ProductActivity, ProductDocument, ProductSerial, ProductStockSetting, Unit, type ProductDoc } from '../../models/product.model.js';
 import { StockLevel, Warehouse } from '../../models/logistics.model.js';
 import { Setting } from '../../models/setting.model.js';
@@ -62,6 +63,8 @@ export function toDto(p: Lean, ctx: Ctx) {
     status, statusLabel: STATUS_LABEL[status], statusReason: p.statusReason ?? null, statusChangedAt: p.statusChangedAt ?? null, isActive: status === 'active', canUse: status === 'active',
     categoryId: refId(p.categoryId), categoryName: p.categoryId?.name ?? null, ...path,
     unitId: refId(p.unitId), unitCode: p.unitId?.code ?? null, unitName: p.unitId?.name ?? null,
+    /** Précision des quantités de l'article (série : entier). */
+    quantityDecimals: p.hasSerial ? 0 : unitDecimals(p.unitId), unitFixed: !!p.unitId?.fixedKey,
     vatRateCode: p.vatRateCode, vatRatePct: vat?.ratePct ?? null, vatRegime: vat?.regime ?? null,
     salePriceMinor: sale, saleTtcMinor: saleTtc, minSalePriceMinor: p.minSalePriceMinor ?? null, maxDiscountPct: p.maxDiscountPct ?? null,
     mainSupplierId: refId(p.mainSupplierId), mainSupplierName: p.mainSupplierId?.name ?? null, mainSupplierCode: p.mainSupplierId?.code ?? null, mainSupplierArchived: !!p.mainSupplierId?.isArchived,
@@ -95,7 +98,7 @@ export function toDto(p: Lean, ctx: Ctx) {
 const kindOk = (p: Lean) => p.kind !== 'service';
 export type ProductDto = ReturnType<typeof toDto>;
 
-const POPULATE = [{ path: 'categoryId', select: 'name parentId' }, { path: 'unitId', select: 'code name' }, { path: 'mainSupplierId', select: 'name code isArchived' }];
+const POPULATE = [{ path: 'categoryId', select: 'name parentId' }, { path: 'unitId', select: 'code name decimals fixedKey' }, { path: 'mainSupplierId', select: 'name code isArchived' }];
 
 async function context(companyId: Id, access: Access, items: Lean[], stock?: Map<string, number>): Promise<Ctx> {
   const [catRows, settings] = await Promise.all([Category.find({ companyId }).select('name parentId isArchived').lean(), Setting.findOne({ companyId }).lean()]);
@@ -256,7 +259,12 @@ async function resolveCategory(companyId: Id, d: Input, existing?: Lean): Promis
 }
 
 async function validateRefs(companyId: Id, d: Input, existing?: Lean) {
-  if (d.unitId && !(await Unit.exists({ _id: d.unitId, companyId }))) throw AppError.badRequest('Unité de vente invalide');
+  if (d.unitId) {
+    const unit = await Unit.findOne({ _id: d.unitId, companyId }).select('fixedKey').lean();
+    if (!unit) throw AppError.badRequest('Unité de vente invalide');
+    // Une unité historique reste sur les articles qui l'avaient déjà, mais n'est plus choisie pour un autre
+    if (!unit.fixedKey && (!existing || refId(existing.unitId) !== d.unitId)) throw AppError.badRequest('Choisissez une des unités proposées : Pièce, Mètre ou Kilogramme');
+  }
   if (d.mainSupplierId) {
     const sup = await Supplier.findOne({ _id: d.mainSupplierId, companyId }).select('isArchived status').lean();
     if (!sup) throw AppError.badRequest('Fournisseur habituel invalide');
@@ -380,9 +388,14 @@ export async function duplicate(companyId: Id, id: string, d: { reference: strin
   const src = await getOwn(companyId, id);
   const o = src as unknown as { toObject?: () => unknown };
   const plain = JSON.parse(JSON.stringify(o.toObject ? o.toObject() : src)) as Record<string, any>;
+  // Le nouvel article doit porter une unité proposée : une unité historique reconnue est remplacée par son équivalent
+  await ensureFixedUnits(companyId);
+  let unit = await Unit.findOne({ _id: refId(src.unitId), companyId }).lean();
+  if (unit && !unit.fixedKey) { const m = matchFixed(unit.code, unit.name); unit = m ? await Unit.findOne({ companyId, fixedKey: m.key }).lean() : null; }
+  if (!unit) throw AppError.badRequest('Cet article utilise une unité historique : créez le nouvel article avec Pièce, Mètre ou Kilogramme');
   const p = await Product.create({
     companyId, reference: d.reference, name: d.name ?? `${src.name} (copie)`, description: src.description, kind: src.kind,
-    categoryId: refId(src.categoryId) ?? undefined, unitId: refId(src.unitId)!, purchasePriceMinor: access.purchase ? src.purchasePriceMinor : 0, salePriceMinor: src.salePriceMinor, vatRateCode: src.vatRateCode, minStock: src.minStock,
+    categoryId: refId(src.categoryId) ?? undefined, unitId: unit._id, purchasePriceMinor: access.purchase ? src.purchasePriceMinor : 0, salePriceMinor: src.salePriceMinor, vatRateCode: src.vatRateCode, minStock: src.minStock,
     mainSupplierId: src.mainSupplierId?.isArchived ? undefined : refId(src.mainSupplierId) ?? undefined, hasSerial: src.hasSerial, status: 'active', isActive: true, minSalePriceMinor: src.minSalePriceMinor, maxDiscountPct: src.maxDiscountPct,
     ...(access.purchase && { purchaseCurrency: src.purchaseCurrency, purchasePriceForeignMinor: src.purchasePriceForeignMinor, purchaseRate: src.purchaseRate, purchaseRateDate: src.purchaseRateDate, estimatedCostMinor: src.estimatedCostMinor }),
     ...(plain.packaging && { packaging: plain.packaging }), ...(access.customs && plain.customs && { customs: plain.customs }),
@@ -459,7 +472,7 @@ export async function exportRows(companyId: Id, f: ProductFilters, access: Acces
   const stock = access.stock ? await stockMap(companyId, rows.map((p) => p._id), f.warehouseId) : undefined; const ctx = await context(companyId, access, rows, stock);
   return rows.map((p) => toDto(p, ctx));
 }
-export const exportColumns = (d: number, access: Access, extended: boolean, currencyDecimals: Record<string, number> = {}): Column<ProductDto>[] => {
+export const exportColumns = (d: number, access: Access, extended: boolean, currencyDecimals: Record<string, number> = {}, base = 'TND'): Column<ProductDto>[] => {
   const m = (v: number | null) => (v == null ? '' : Number((v / 10 ** d).toFixed(d)));
   return [
     { header: 'Code article', key: 'reference', width: 16, value: (p) => p.reference },
@@ -472,7 +485,7 @@ export const exportColumns = (d: number, access: Access, extended: boolean, curr
       { header: 'Prix d\'achat HT', key: 'purchase', width: 12, align: 'right' as const, value: (p: ProductDto) => m(p.purchasePriceMinor) },
       { header: 'Devise d\'achat', key: 'cur', width: 8, value: (p: ProductDto) => p.purchaseCurrency },
       { header: 'Prix d\'achat en devise', key: 'foreign', width: 14, align: 'right' as const, value: (p: ProductDto) => (p.purchasePriceForeignMinor == null || !p.purchaseCurrency ? '' : p.purchasePriceForeignMinor / 10 ** (currencyDecimals[p.purchaseCurrency] ?? 2)) },
-      { header: 'Contre-valeur estimée', key: 'estp', width: 14, align: 'right' as const, value: (p: ProductDto) => m(p.estimatedPurchaseMinor) },
+      { header: `Coût d'achat HT en ${base === 'TND' ? 'DT' : base}`, key: 'estp', width: 14, align: 'right' as const, value: (p: ProductDto) => m(p.estimatedPurchaseMinor) },
       { header: 'Coût de revient estimé', key: 'estc', width: 14, align: 'right' as const, value: (p: ProductDto) => m(p.estimatedCostValueMinor) },
     ] : []),
     { header: 'Prix de vente HT', key: 'sale', width: 12, align: 'right', value: (p) => m(p.salePriceMinor) },

@@ -16,10 +16,17 @@ categorySchema.index({ companyId: 1, parentId: 1, name: 1 }, { unique: true, col
 export const Category = model('Category', categorySchema);
 
 const unitSchema = new Schema(
-  { companyId: { type: Schema.Types.ObjectId, ref: 'Company', required: true }, code: { type: String, required: true, trim: true }, name: { type: String, required: true, trim: true } },
+  {
+    companyId: { type: Schema.Types.ObjectId, ref: 'Company', required: true }, code: { type: String, required: true, trim: true }, name: { type: String, required: true, trim: true },
+    /** Une des trois unités fixes (pièce, mètre, kilogramme). Absent : unité historique, conservée sur ses articles. */
+    fixedKey: { type: String, enum: ['piece', 'meter', 'kilogram'] },
+    /** Nombre de décimales autorisées pour les quantités. */
+    decimals: { type: Number, min: 0, max: 3 },
+  },
   { timestamps: true },
 );
 unitSchema.index({ companyId: 1, code: 1 }, { unique: true });
+unitSchema.index({ companyId: 1, fixedKey: 1 }, { unique: true, partialFilterExpression: { fixedKey: { $type: 'string' } } });
 export const Unit = model('Unit', unitSchema);
 
 export const PRODUCT_STATUSES = ['active', 'inactive', 'archived', 'blocked'] as const;

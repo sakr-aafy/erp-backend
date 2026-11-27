@@ -12,4 +12,5 @@ export * from './supplier.model.js';
 export * from './user.model.js';
 export * from './sales.model.js';
 export * from './logistics.model.js';
+export * from './payment-term.model.js';
 export * from './finance.model.js';

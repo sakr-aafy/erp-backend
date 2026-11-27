@@ -10,11 +10,14 @@ import { minorInt } from '../parties/party.shared.js';
 import { addressesOf, resolveAddress, type AddressSnapshot } from '../parties/delivery-address.js';
 import { CalculationError, computeDocument, type CalcInput, type CalcLine, type DocTotals, type VatRegime } from '../../services/calculation.service.js';
 import { resolveStamp, resolveVat, resolveWithholding, type VatSnapshot } from '../../services/fiscal.service.js';
+import { assertQuantities } from '../products/units.js';
 
 type Id = Types.ObjectId;
 export type DocType = 'quotation' | 'proforma' | 'invoice' | 'creditNote' | 'deliveryNote';
 
 // ---- Schémas de validation communs (API) ----
+/** Remise en pourcentage saisie : un chiffre après la virgule au plus (les documents antérieurs gardent leurs valeurs). */
+export const discountPct = z.number().min(0, 'Remise entre 0 et 100 %').max(100, 'Remise entre 0 et 100 %').refine((d) => Math.abs(d * 10 - Math.round(d * 10)) < 1e-6, 'Remise : un seul chiffre après la virgule');
 export const lineBody = z.object({
   /** Identifiant de la ligne existante (devis) : conservé à la modification pour suivre son historique. Ignoré ailleurs. */
   id: objectId.optional(),
@@ -22,7 +25,7 @@ export const lineBody = z.object({
   unit: z.string().trim().max(12).optional(),
   quantity: z.number().gt(0).max(1e9).refine((q) => Math.abs(q * 1000 - Math.round(q * 1000)) < 1e-6, '3 décimales maximum'),
   unitPriceMinor: minorInt.optional(),
-  discountPct: z.number().min(0).max(100).refine((d) => Math.abs(d * 100 - Math.round(d * 100)) < 1e-6, '2 décimales maximum').default(0),
+  discountPct: discountPct.default(0),
   vatCode: z.string().trim().min(1).max(30).optional(),
   sourceLineId: objectId.optional(),
   /** BL : numéros de série livrés (articles suivis par série). */
@@ -30,7 +33,14 @@ export const lineBody = z.object({
 }).strict();
 export const docFields = {
   customerId: objectId, lines: z.array(lineBody).min(1, 'Au moins une ligne').max(500),
-  globalDiscountPct: z.number().min(0).max(100).default(0), globalDiscountMinor: minorInt.default(0),
+  /** Remise globale en % : fixe la remise de TOUTES les lignes à ce taux (0 : remises libres par ligne). Jamais appliquée une seconde fois au total. */
+  syncDiscountPct: discountPct.default(0),
+  /** Remise supplémentaire en montant, appliquée après les remises de ligne. */
+  globalDiscountMinor: minorInt.default(0),
+  /** Ancienne remise globale en % appliquée au total : plus acceptée en saisie. */
+  globalDiscountPct: z.number().max(0, 'La remise globale en % s’applique désormais aux lignes : utilisez syncDiscountPct').optional(),
+  /** Document antérieur : retire son ancienne remise globale en % (sinon elle est conservée à la modification). */
+  removeLegacyDiscount: z.boolean().optional(),
   withholdingOperationType: z.string().trim().max(30).optional(), notes: z.string().trim().max(2000).optional(),
   /** Dérogation aux règles de prix de l'article (prix minimum, remise maximale) : motif obligatoire, permission products:validate, audité. */
   priceOverrideReason: z.string().trim().min(3).max(300).optional(),
@@ -41,7 +51,9 @@ export const docFields = {
 export const paymentTermsDocFields = { paymentTerms: z.string().trim().max(500).nullable().optional(), paymentTermsCustom: z.boolean().optional() };
 export type LineInput = z.infer<typeof lineBody> & { vat?: VatSnapshot };
 export interface PaymentTerms { paymentTerms?: string | null | undefined; paymentTermsCustom?: boolean | null | undefined }
-export interface DocInput extends PaymentTerms { customerId: string | Id; lines: LineInput[]; globalDiscountPct?: number; globalDiscountMinor?: number; withholdingOperationType?: string | null | undefined; deliveryAddressId?: string | null | undefined }
+export interface DocInput extends PaymentTerms { customerId: string | Id; lines: LineInput[]; syncDiscountPct?: number; globalDiscountMinor?: number; removeLegacyDiscount?: boolean | undefined;
+  /** INTERNE (conversion, duplication, modification d'un document antérieur) : ancienne remise globale en % à conserver. */
+  globalDiscountPct?: number | undefined; withholdingOperationType?: string | null | undefined; deliveryAddressId?: string | null | undefined }
 /** Valeurs déjà figées sur le document (modification) ou sur le document source (conversion). */
 export interface Inherited extends PaymentTerms { deliveryAddress?: unknown }
 
@@ -52,8 +64,8 @@ export interface BuiltLine {
 }
 export interface BuiltDocument {
   customer: { _id: Id; name: string; taxId?: string | null | undefined; address?: unknown; paymentDelayDays?: number | null | undefined };
-  customerSnapshot: { name: string; code?: string | undefined; taxId?: string | undefined; address?: unknown; shippingAddress?: unknown };
-  lines: BuiltLine[]; globalDiscountPct: number; globalDiscountMinor: number; withholdingOperationType?: string | undefined;
+  customerSnapshot: { name: string; code?: string | undefined; taxId?: string | undefined; email?: string | undefined; phone?: string | undefined; address?: unknown; shippingAddress?: unknown };
+  lines: BuiltLine[]; globalDiscountPct: number; syncDiscountPct: number; globalDiscountMinor: number; withholdingOperationType?: string | undefined;
   withholding?: { ruleId: Id; code: string; ratePct: number; base: 'ht' | 'ttc'; amountMinor: number } | undefined;
   stamp?: { ruleId: Id; code: string; amountMinor: number } | undefined; totals: DocTotals;
   deliveryAddress: AddressSnapshot | null; paymentTerms: string | null; paymentTermsCustom: boolean;
@@ -75,7 +87,7 @@ export function resolveTerms(customer: PaymentTerms, input: PaymentTerms, curren
  * totaux calculés par le service de calcul unique, puis retenue à la source et timbre si leurs règles validées s'appliquent.
  * Le serveur ne fait confiance à AUCUN montant calculé par le client.
  */
-export async function buildDocument(companyId: Id, docType: DocType, input: DocInput, opts: { date: Date; session?: ClientSession; allowArchivedCustomer?: boolean; inherit?: Inherited }): Promise<BuiltDocument> {
+export async function buildDocument(companyId: Id, docType: DocType, input: DocInput, opts: { date: Date; session?: ClientSession; allowArchivedCustomer?: boolean; inherit?: Inherited; /** Quantités reprises d'un document existant : conservées telles quelles. */ preserveQuantities?: boolean }): Promise<BuiltDocument> {
   const { date, session } = opts;
   const customer = await Customer.findOne({ _id: input.customerId, companyId }).session(session ?? null).lean();
   if (!customer) throw AppError.badRequest('Client invalide');
@@ -85,6 +97,9 @@ export async function buildDocument(companyId: Id, docType: DocType, input: DocI
   const productIds = [...new Set(input.lines.map((l) => l.productId).filter(Boolean) as string[])];
   const products = productIds.length ? await Product.find({ _id: { $in: productIds }, companyId }).session(session ?? null).populate('unitId', 'code').lean() : [];
   const byId = new Map(products.map((p) => [p._id.toString(), p]));
+  if (!opts.preserveQuantities) await assertQuantities(companyId, input.lines.map((l) => ({ productId: l.productId, unit: l.unit, quantity: l.quantity })), session);
+  const sync = input.syncDiscountPct ?? 0; const legacy = input.globalDiscountPct ?? 0;
+  if (legacy > 0 && (sync > 0 || (input.globalDiscountMinor ?? 0) > 0)) throw new AppError(422, `Ce document porte une ancienne remise globale de ${String(legacy).replace('.', ',')} % appliquée au total : retirez-la avant de saisir une nouvelle remise globale.`, 'LEGACY_DISCOUNT');
   const vatCache = new Map<string, VatSnapshot>();
   const vatFor = async (code: string) => { const k = code.toUpperCase(); if (!vatCache.has(k)) vatCache.set(k, await resolveVat(companyId, k, date, session)); return vatCache.get(k)!; };
 
@@ -102,7 +117,7 @@ export async function buildDocument(companyId: Id, docType: DocType, input: DocI
     const vat = l.vat ?? await vatFor(vatCode);
     built.push({
       ...(p && { productId: p._id }), reference: p?.reference, designation, description: l.description, unit: l.unit ?? (p?.unitId as { code?: string } | undefined)?.code, kind: p?.kind ?? 'product',
-      quantity: l.quantity, unitPriceMinor, discountPct: l.discountPct ?? 0, vat: { ruleId: vat.ruleId, code: vat.code, regime: vat.regime, ratePct: vat.ratePct },
+      quantity: l.quantity, unitPriceMinor, discountPct: sync > 0 ? sync : l.discountPct ?? 0, vat: { ruleId: vat.ruleId, code: vat.code, regime: vat.regime, ratePct: vat.ratePct },
       grossMinor: 0, discountMinor: 0, netHtMinor: 0, globalShareMinor: 0, deliveredQty: 0, ...(l.sourceLineId && { sourceLineId: l.sourceLineId }), ...(l.serials?.length && { serials: l.serials }),
     });
   }
@@ -124,10 +139,10 @@ export async function buildDocument(companyId: Id, docType: DocType, input: DocI
   result.lines.forEach((r, i) => Object.assign(built[i]!, r));
   return {
     customer: { _id: customer._id, name: customer.name, taxId: customer.taxId, address: customer.address, paymentDelayDays: customer.paymentDelayDays },
-    customerSnapshot: { name: customer.name, ...(customer.code && { code: customer.code }), ...(customer.taxId && { taxId: customer.taxId }), address: customer.address },
+    customerSnapshot: { name: customer.name, ...(customer.code && { code: customer.code }), ...(customer.taxId && { taxId: customer.taxId }), ...(customer.email && { email: customer.email }), ...(customer.phone && { phone: customer.phone }), address: customer.address },
     deliveryAddress: resolveAddress(customer, input.deliveryAddressId, opts.inherit?.deliveryAddress as AddressSnapshot | null | undefined),
     ...resolveTerms(customer, input, opts.inherit && opts.inherit.paymentTerms !== undefined ? opts.inherit : undefined),
-    lines: built, globalDiscountPct: input.globalDiscountPct ?? 0, globalDiscountMinor: input.globalDiscountMinor ?? 0,
+    lines: built, globalDiscountPct: legacy, syncDiscountPct: sync, globalDiscountMinor: input.globalDiscountMinor ?? 0,
     ...(input.withholdingOperationType && { withholdingOperationType: input.withholdingOperationType }), withholding, stamp, totals: result.totals,
   };
 }
@@ -136,6 +151,10 @@ type Frozen = PaymentTerms & { customerId: unknown; deliveryAddress?: unknown };
 /** Adresse et conditions figées d'un document, à conserver tant que le client reste le même. */
 export const inheritFrom = (d: Frozen, customerId: unknown): Inherited | undefined => (String(d.customerId) === String(customerId)
   ? { deliveryAddress: d.deliveryAddress, paymentTerms: d.paymentTerms, paymentTermsCustom: d.paymentTermsCustom } : undefined);
+/** Modification d'un document antérieur : son ancienne remise globale est conservée tant qu'on ne demande pas à la retirer. */
+export const legacyDiscountOf = (current: { globalDiscountPct?: number | null }, body: { removeLegacyDiscount?: boolean | undefined }) => ((current.globalDiscountPct ?? 0) > 0 && !body.removeLegacyDiscount ? { globalDiscountPct: current.globalDiscountPct! } : { globalDiscountPct: 0 });
+/** Remises à reprendre lors d'une conversion ou d'une duplication : montants identiques au document source. */
+export const discountsOf = (d: { globalDiscountPct?: number | null; syncDiscountPct?: number | null; globalDiscountMinor?: number | null }) => ({ globalDiscountPct: d.globalDiscountPct ?? 0, syncDiscountPct: d.syncDiscountPct ?? 0, globalDiscountMinor: d.globalDiscountMinor ?? 0 });
 /** Champs à enregistrer sur un devis, une proforma ou une facture. */
 export const frozenOf = (d: BuiltDocument) => ({ deliveryAddress: d.deliveryAddress, paymentTerms: d.paymentTerms, paymentTermsCustom: d.paymentTermsCustom });
 /** Duplication : l'adresse du document source n'est reprise que si elle est toujours active chez le client (sinon adresse par défaut). */

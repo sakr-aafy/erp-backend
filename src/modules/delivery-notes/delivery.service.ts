@@ -11,6 +11,7 @@ import { assertCanSell } from '../customers/customer.service.js';
 import { buildDocument, inheritFrom, linesToInput, type LineInput } from '../sales/document.builder.js';
 import { snapshotDto } from '../parties/delivery-address.js';
 import { rangeFilter } from '../sales/document.http.js';
+import { assertQuantities, carriedOver } from '../products/units.js';
 
 type Id = Types.ObjectId;
 type Lean = DeliveryNoteDoc & { _id: Id; createdAt?: Date };
@@ -39,14 +40,17 @@ async function loadSource(companyId: Id, type: SourceType, id: string, session?:
 }
 
 /** Lignes livrables d'un document source (articles uniquement) avec la quantité restante à livrer. */
+/** Un devis ne donne plus lieu à une livraison (proforma ou facture) ; les BL déjà créés depuis un devis restent exploitables. */
+const noQuotationSource = () => new AppError(410, 'Un devis ne se livre pas directement : convertissez-le en proforma', 'CONVERSION_REMOVED');
 export async function sourceLines(companyId: Id, type: SourceType, id: string) {
+  if (type === 'quotation') throw noQuotationSource();
   const src = await loadSource(companyId, type, id);
   const { Product } = await import('../../models/product.model.js');
   const prods = await Product.find({ companyId, _id: { $in: src.lines.map((l) => (l as { productId?: Id }).productId).filter(Boolean) } }).select('hasSerial').lean(); const serial = new Set(prods.filter((p) => p.hasSerial).map((p) => p._id.toString()));
   return { sourceNumber: src.number ?? null, customerId: src.customerId.toString(),
     // absent : document antérieur aux adresses multiples (l'adresse par défaut du client sera reprise)
     ...(src.deliveryAddress !== undefined && { deliveryAddress: snapshotDto(src.deliveryAddress as never) }),
-    lines: src.lines.filter((l) => l.kind !== 'service').map((l) => ({ sourceLineId: l._id.toString(), hasSerial: serial.has(String((l as { productId?: Id }).productId)), designation: l.designation, quantity: l.quantity, deliveredQty: l.deliveredQty ?? 0, remainingQty: Math.max(0, l.quantity - (l.deliveredQty ?? 0)) })) };
+    lines: src.lines.filter((l) => l.kind !== 'service').map((l) => ({ sourceLineId: l._id.toString(), hasSerial: serial.has(String((l as { productId?: Id }).productId)), unit: (l as { unit?: string | null }).unit ?? null, designation: l.designation, quantity: l.quantity, deliveredQty: l.deliveredQty ?? 0, remainingQty: Math.max(0, l.quantity - (l.deliveredQty ?? 0)) })) };
 }
 
 export async function list(companyId: Id, f: { q?: string | undefined; status?: string | undefined; customerId?: string | undefined; invoiced?: boolean | undefined; from?: Date | undefined; to?: Date | undefined; page: number; limit: number; sort?: string | undefined }) {
@@ -83,17 +87,19 @@ async function prepare(companyId: Id, b: Body, session: ClientSession, ignoreBl?
     const remaining = sl.quantity - (sl.deliveredQty ?? 0);
     if (l.quantity > remaining + 1e-9) throw AppError.conflict(`« ${sl.designation} » : quantité à livrer (${l.quantity}) supérieure au reste (${remaining})`);
     lines.push({ ...linesToInput([sl as never], false, 'self')[0]!, quantity: l.quantity, ...(l.serials?.length && { serials: l.serials }) });
+    await assertQuantities(companyId, [{ productId: (sl as { productId?: Id }).productId, quantity: l.quantity, exempt: carriedOver(l.quantity, sl.quantity, remaining), label: `« ${sl.designation} »` }], session);
   }
   void ignoreBl;
   return { customerId: src.customerId.toString(), lines, source: { type: b.source.type, id: src._id, number: src.number ?? '' }, sourceAddress: src.deliveryAddress };
 }
 
 export async function create(companyId: Id, userId: Id, b: Body) {
+  if (b.source?.type === 'quotation') throw noQuotationSource();
   await ensureCounter(companyId, 'deliveryNote', startOfDay(b.deliveryDate ?? new Date()));
   return withTransaction(async (session) => {
     const date = startOfDay(b.deliveryDate ?? new Date());
     const p = await prepare(companyId, b, session);
-    const doc = await buildDocument(companyId, 'deliveryNote', { customerId: p.customerId, lines: p.lines, deliveryAddressId: b.deliveryAddressId }, { date, session, inherit: { deliveryAddress: p.sourceAddress } });
+    const doc = await buildDocument(companyId, 'deliveryNote', { customerId: p.customerId, lines: p.lines, deliveryAddressId: b.deliveryAddressId }, { date, session, inherit: { deliveryAddress: p.sourceAddress }, preserveQuantities: !!p.source });
     const number = await nextDocumentNumber(companyId, 'deliveryNote', session, date);
     const [c] = await DeliveryNote.create([{ companyId, number, customerId: doc.customer._id, customerSnapshot: doc.customerSnapshot, deliveryDate: date, carrier: b.carrier, lines: doc.lines, totals: doc.totals,
       source: p.source, deliveryAddress: doc.deliveryAddress, notes: b.notes, createdBy: userId }] as never[], { session });
@@ -109,7 +115,7 @@ export async function update(companyId: Id, id: string, b: Body) {
     const body: Body = { ...b, ...(cur.source?.type && { source: { type: cur.source.type as SourceType, id: cur.source.id!.toString() } }) }; // la source ne change pas
     const p = await prepare(companyId, body, session);
     const inherit = inheritFrom(cur, p.customerId);
-    const doc = await buildDocument(companyId, 'deliveryNote', { customerId: p.customerId, lines: p.lines, deliveryAddressId: b.deliveryAddressId }, { date, session, ...(inherit && { inherit }) });
+    const doc = await buildDocument(companyId, 'deliveryNote', { customerId: p.customerId, lines: p.lines, deliveryAddressId: b.deliveryAddressId }, { date, session, ...(inherit && { inherit }), preserveQuantities: !!p.source });
     const u = await DeliveryNote.findOneAndUpdate({ _id: id, companyId, status: 'draft' }, { $set: { deliveryAddress: doc.deliveryAddress, customerId: doc.customer._id, customerSnapshot: doc.customerSnapshot, deliveryDate: date, carrier: b.carrier, lines: doc.lines, totals: doc.totals, notes: b.notes } }, { returnDocument: 'after', session }).lean();
     if (!u) throw AppError.conflict('Le BL a changé entre-temps');
     return toDto(u as Lean);

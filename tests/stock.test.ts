@@ -3,7 +3,7 @@ import { binaryParser, login, makeUser, setupDb, teardownDb } from './helpers.js
 import { J, line, logisticsCompany, levelOf, costOf, quoteBody, stockIn, stockOut, api, type LCtx } from './sales.helpers.js';
 import { AuditLog } from '../src/models/audit-log.model.js';
 import { CostHistory, EventLog, StockLevel, StockMovement } from '../src/models/logistics.model.js';
-import { DeliveryNote, Quotation } from '../src/models/sales.model.js';
+import { DeliveryNote, Proforma } from '../src/models/sales.model.js';
 import { ProductSerial } from '../src/models/product.model.js';
 import { emitDomainEvent } from '../src/services/domain-events.js';
 import { applyMovement } from '../src/services/stock.service.js';
@@ -13,10 +13,9 @@ let A: LCtx, B: LCtx; let P: string, Q: string;
 beforeAll(async () => { await setupDb(); A = await logisticsCompany('Alpha', 'admin@a.test'); B = await logisticsCompany('Beta', 'admin@b.test'); P = A.products.a19; Q = A.products.b13; });
 afterAll(teardownDb);
 
-const acceptedQuote = async (c: LCtx, productId: string, qty: number) => { const q = (await c.j.post('/quotations', quoteBody(c, [line(productId, qty)]))).body; await c.j.post(`/quotations/${q.id}/accept`); return (await c.j.get(`/quotations/${q.id}`)).body; };
 const mkBl = async (c: LCtx, productId: string, qty: number, serials?: string[]) => {
-  const q = await acceptedQuote(c, productId, qty);
-  return (await c.j.post('/delivery-notes', { source: { type: 'quotation', id: q.id }, lines: [{ sourceLineId: q.lines[0].id, quantity: qty, ...(serials && { serials }) }] })).body;
+  const q = (await c.j.post('/proformas', quoteBody(c, [line(productId, qty)]))).body; // source de livraison
+  return (await c.j.post('/delivery-notes', { source: { type: 'proforma', id: q.id }, lines: [{ sourceLineId: q.lines[0].id, quantity: qty, ...(serials && { serials }) }] })).body;
 };
 
 describe('magasins', () => {
@@ -142,7 +141,7 @@ describe('intégration : bon de livraison → sortie de stock', () => {
   it('stock insuffisant : la validation du BL est refusée EN ENTIER (BL reste brouillon, aucun mouvement)', async () => {
     const bl = await mkBl(A, P, 50); const r = await A.j.post(`/delivery-notes/${bl.id}/validate`); expect(r.status).toBe(409); expect(r.body.error.code).toBe('INSUFFICIENT_STOCK');
     expect((await A.j.get(`/delivery-notes/${bl.id}`)).body.status).toBe('draft'); expect(await StockMovement.countDocuments({ 'source.id': bl.id })).toBe(0);
-    expect((await Quotation.findById(bl.source.id))!.lines[0]!.deliveredQty).toBe(0); // quantités livrées du devis inchangées
+    expect((await Proforma.findById(bl.source.id))!.lines[0]!.deliveredQty).toBe(0); // quantités livrées de la source inchangées
   });
   it('autorisation de stock négatif sur BL : permission dédiée', async () => {
     const bl = await mkBl(A, P, 50);
@@ -152,7 +151,6 @@ describe('intégration : bon de livraison → sortie de stock', () => {
     expect((await StockMovement.findOne({ 'source.id': bl.id }))!.forced).toBe(true);
   });
   it('services : aucun mouvement ; pas de magasin : erreur explicite', async () => {
-    const q = (await B.j.post('/quotations', quoteBody(B, [line(B.products.svc, 1)]))).body; await B.j.post(`/quotations/${q.id}/accept`);
     // le service seul n'est pas livrable → on vérifie plutôt l'absence de magasin avec un article
     await StockLevel.deleteMany({ companyId: B.companyId }); await (await import('../src/models/logistics.model.js')).Warehouse.deleteMany({ companyId: B.companyId });
     const bl = await mkBl(B, B.products.a19, 1); const r = await B.j.post(`/delivery-notes/${bl.id}/validate`); expect(r.status).toBe(409); expect(r.body.error.code).toBe('NO_WAREHOUSE');
@@ -214,7 +212,7 @@ describe('numéros de série', () => {
     expect((await stockIn(A, S, 2, 50_000, A.w1, { serials: ['SN-1'] })).status).toBe(400); // 1 série pour 2 unités
     expect((await stockIn(A, S, 3, 50_000, A.w1, { serials: ['SN-1', 'SN-2', 'SN-3'] })).status).toBe(201);
     expect((await stockIn(A, S, 1, 50_000, A.w1, { serials: ['SN-1'] })).status).toBe(409); // déjà enregistré
-    expect((await A.j.post('/stock/movements', { direction: 'in', productId: S, warehouseId: A.w1, quantity: 1.5, unitCostMinor: 1, reason: 'décimal', serials: ['X'] })).status).toBe(400);
+    expect((await A.j.post('/stock/movements', { direction: 'in', productId: S, warehouseId: A.w1, quantity: 1.5, unitCostMinor: 1, reason: 'décimal', serials: ['X'] })).status).toBe(422);
     const bl = await mkBl(A, S, 2, ['SN-1', 'SN-2']);
     expect((await A.j.post(`/delivery-notes/${(await mkBl(A, S, 1, ['SN-9'])).id}/validate`)).status).toBe(409); // série inconnue
     expect((await A.j.post(`/delivery-notes/${bl.id}/validate`)).status).toBe(200);
