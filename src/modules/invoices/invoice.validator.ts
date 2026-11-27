@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { PAYMENT_METHODS } from '../../models/sales.model.js';
-import { minorInt } from '../parties/party.shared.js';
+import { addressZ, minorInt, partyFields } from '../parties/party.shared.js';
 import { objectId } from '../../utils/pagination.js';
 import { baseListQuery, boolQuery } from '../sales/document.http.js';
 import { docFields, paymentTermsDocFields } from '../sales/document.builder.js';
@@ -8,6 +8,15 @@ import { docFields, paymentTermsDocFields } from '../sales/document.builder.js';
 const schedule = z.array(z.object({ dueDate: z.coerce.date(), percent: z.number().gt(0).max(100) }).strict()).max(24)
   .refine((s) => !s.length || Math.abs(s.reduce((a, b) => a + b.percent, 0) - 100) < 0.001, 'Le total des échéances doit faire 100 %');
 export const invoiceBody = z.object({ ...docFields, ...paymentTermsDocFields, issueDate: z.coerce.date().optional(), paymentMethod: z.enum(PAYMENT_METHODS).optional(), schedule: schedule.optional() }).strict();
+/** Coordonnées complètes à imprimer (chaîne vide = ligne retirée) : tous les champs sont exigés pour ne rien effacer par omission. */
+export const customerDetailsBody = z.object({
+  name: partyFields.name, taxId: z.string().trim().max(40),
+  phone: z.string().trim().regex(/^$|^\+?[\d\s().\-/]{6,25}$/, 'Numéro de téléphone invalide'),
+  email: z.preprocess((v) => (typeof v === 'string' ? v.trim() : v), z.union([z.literal(''), z.email()])),
+  address: addressZ.required(),
+  reason: z.string().trim().min(3, 'Indiquez le motif (3 caractères minimum)').max(300),
+  updateCustomer: z.boolean(),
+}).strict();
 /** Les montants ne sont jamais reçus : seules les livraisons, les quantités choisies et le mode de regroupement le sont. */
 export const fromDeliveryNotesBody = z.object({
   deliveryNoteIds: z.array(objectId).min(1).max(50), issueDate: z.coerce.date().optional(), mode: z.enum(['grouped', 'individual']).default('grouped'),

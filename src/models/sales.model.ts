@@ -194,6 +194,10 @@ export const Proforma = model('Proforma', proformaSchema);
 // ---- Facture de vente / avoir ----
 /** Échéance : reste dû = montant − payé − crédité (avoirs imputés sur les échéances les plus lointaines d'abord). */
 const scheduleSchema = new Schema({ dueDate: { type: Date, required: true }, percent: Number, amountMinor: { type: Number, default: 0 }, paidMinor: { type: Number, default: 0 }, creditedMinor: { type: Number, default: 0 } }, { _id: true });
+/** Coordonnées imprimées avant / après correction d'une facture validée. */
+const printedCustomer = new Schema({ name: String, taxId: String, phone: String, email: String, address: addressSchema }, { _id: false, minimize: false });
+const customerCorrectionSchema = new Schema({ at: { type: Date, required: true }, userId: oid('User'), userName: String, reason: { type: String, required: true }, before: printedCustomer, after: printedCustomer }, { _id: false });
+
 const invoiceSchema = new Schema({
   ...commonDoc, ...paymentTermsFields,
   type: { type: String, enum: ['invoice', 'credit_note'], default: 'invoice' },
@@ -213,6 +217,8 @@ const invoiceSchema = new Schema({
   /** Avoir : effet sur les quantités. « financial » : aucun ; « return » : retour physique attendu ; « billing_correction » : quantités à refacturer. */
   creditEffect: { type: String, enum: ['financial', 'return', 'billing_correction'] },
   legacyFlow: Boolean,
+  /** Historique des corrections de coordonnées après validation : jamais modifié ni supprimé. */
+  customerCorrections: { type: [customerCorrectionSchema], default: undefined },
 }, { timestamps: true });
 invoiceSchema.index({ companyId: 1, type: 1, number: 1 }, { unique: true, partialFilterExpression: { number: { $type: 'string' } } });
 invoiceSchema.index({ companyId: 1, status: 1, issueDate: -1 });

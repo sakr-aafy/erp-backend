@@ -43,6 +43,7 @@ export function toDto(i: Lean) {
     validatedAt: i.validatedAt ?? null, validatedByName: i.validatedByName ?? null, sentAt: i.sentAt ?? null, createdAt: i.createdAt, editable: i.status === 'draft',
     /** Facture issue de BL : lignes et montants affectés par le serveur. */
     origin: i.origin ?? null, linesLocked: i.origin === 'delivery', creditEffect: i.type === 'credit_note' ? i.creditEffect ?? 'financial' : null, sourceRefs: i.sourceRefs ?? null, legacyFlow: !!i.legacyFlow,
+    customerCorrections: (i.customerCorrections ?? []).map((c) => ({ at: c.at, userName: c.userName ?? null, reason: c.reason, before: c.before, after: c.after })),
   };
 }
 
