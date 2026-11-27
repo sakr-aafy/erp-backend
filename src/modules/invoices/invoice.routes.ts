@@ -43,11 +43,10 @@ const priceRulesUnlessDelivery = h(async (req: Request, res: Response, next: Nex
 invoiceRoutes.put('/:id', can('invoices:update'), validate({ params: idParam, body: v.invoiceBody }), priceRulesUnlessDelivery, h(async (req: Request, res: Response) => {
   const i = await svc.updateDraft(cid(req), pid(req), req.body); await audit(req, { action: 'update', resource: 'invoice', resourceId: i.id, meta: { totalTtcMinor: i.totals.totalTtcMinor } }); res.json(i);
 }));
-// Facture validée : seules les coordonnées imprimées se corrigent (droit de valider exigé ; la fiche client demande en plus customers:update)
+// Facture validée : seules les coordonnées imprimées sur cette facture se corrigent (droit de valider exigé) ; la fiche client ne change pas
 invoiceRoutes.put('/:id/customer-details', can('invoices:update', 'invoices:validate'), validate({ params: idParam, body: v.customerDetailsBody }), h(async (req: Request, res: Response) => {
-  if (req.body.updateCustomer && !req.auth!.permissions.has('customers:update')) throw AppError.forbidden('Permission requise : customers:update');
   const r = await correctCustomerDetails(cid(req), pid(req), req.body, actor(req));
-  await audit(req, { action: 'correct-customer-details', resource: 'invoice', resourceId: r.invoice.id, meta: { number: r.invoice.number, reason: req.body.reason, customerUpdated: req.body.updateCustomer, before: r.before, after: r.after } });
+  await audit(req, { action: 'correct-customer-details', resource: 'invoice', resourceId: r.invoice.id, meta: { number: r.invoice.number, reason: req.body.reason, before: r.before, after: r.after } });
   res.json(r.invoice);
 }));
 invoiceRoutes.delete('/:id', can('invoices:delete'), validate({ params: idParam }), h(async (req: Request, res: Response) => {

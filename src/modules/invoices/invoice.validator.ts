@@ -15,7 +15,6 @@ export const customerDetailsBody = z.object({
   email: z.preprocess((v) => (typeof v === 'string' ? v.trim() : v), z.union([z.literal(''), z.email()])),
   address: addressZ.required(),
   reason: z.string().trim().min(3, 'Indiquez le motif (3 caractères minimum)').max(300),
-  updateCustomer: z.boolean(),
 }).strict();
 /** Les montants ne sont jamais reçus : seules les livraisons, les quantités choisies et le mode de regroupement le sont. */
 export const fromDeliveryNotesBody = z.object({

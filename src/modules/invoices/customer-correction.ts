@@ -1,19 +1,18 @@
 /**
- * Correction des coordonnées du client imprimées sur une facture VALIDÉE. Seule la copie portée par la facture change :
- * numéro, lignes, montants, échéances et écritures restent identiques. Chaque correction est conservée (avant, après, auteur, motif).
+ * Correction des coordonnées du client imprimées sur une facture VALIDÉE. Seule la copie portée par cette facture change : la fiche
+ * client n'est jamais modifiée ; numéro, lignes, montants, échéances et écritures restent identiques. Chaque correction est conservée.
  */
 import type { Types } from 'mongoose';
 import { Invoice } from '../../models/sales.model.js';
 import { AppError } from '../../utils/errors.js';
 import { normalizePhone } from '../../utils/phone.js';
 import { withTransaction } from '../../utils/transaction.js';
-import * as customers from '../customers/customer.service.js';
 import { normalizeTaxId } from '../parties/party.shared.js';
 import { get } from './invoice.service.js';
 
 type Id = Types.ObjectId;
 export interface CustomerCorrectionInput {
-  name: string; taxId: string; phone: string; email: string; reason: string; updateCustomer: boolean;
+  name: string; taxId: string; phone: string; email: string; reason: string;
   address: { street: string; city: string; postalCode: string; country: string };
 }
 export interface PrintedCustomer { name: string; taxId: string; phone: string; email: string; address: CustomerCorrectionInput['address'] }
@@ -36,11 +35,6 @@ export async function correctCustomerDetails(companyId: Id, id: string, b: Custo
   const before = printed(inv.customerSnapshot as Snapshot);
   const after = printed({ ...b, taxId: normalizeTaxId(b.taxId) ?? '', phone: b.phone ? normalizePhone(b.phone, b.address.country) : '', email: b.email.toLowerCase() });
   if (JSON.stringify(before) === JSON.stringify(after)) throw AppError.conflict('Aucune modification : les coordonnées sont identiques à celles de la facture');
-
-  // La fiche d'abord : ses contrôles d'unicité (matricule, téléphone, e-mail) doivent réussir avant de toucher la facture
-  if (b.updateCustomer) {
-    await customers.update(companyId, inv.customerId.toString(), { name: after.name, taxId: after.taxId || null, phone: after.phone || null, email: after.email || null, address: after.address }, actor);
-  }
 
   await withTransaction(async (session) => {
     const $set: Record<string, unknown> = { 'customerSnapshot.name': after.name, 'customerSnapshot.address': after.address };
